@@ -1,0 +1,153 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: forgeflow
+      POSTGRES_PASSWORD: forgeflow
+      POSTGRES_DB: forgeflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - forgeflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgeflow -d forgeflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      args:
+        TARGET: migrate
+    env_file:
+      - ../.env.local
+    environment:
+      DATABASE_URL: postgres://forgeflow:forgeflow@postgres:5432/forgeflow?sslmode=disable
+      MIGRATIONS_PATH: /migrations
+    command: ["up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      args:
+        TARGET: api
+    env_file:
+      - ../.env.local
+    environment:
+      DATABASE_URL: postgres://forgeflow:forgeflow@postgres:5432/forgeflow?sslmode=disable
+      FORGEFLOW_HTTP_ADDRESS: :8080
+      FORGEFLOW_WEB_BASE_URL: ${FORGEFLOW_WEB_BASE_URL:-http://localhost:13000}
+      FORGEFLOW_ALLOWED_WEB_ORIGINS: "http://localhost:13000,${FORGEFLOW_WEB_BASE_URL:-http://localhost:13000}"
+      FORGEFLOW_SECURE_COOKIES: ${FORGEFLOW_SECURE_COOKIES:-false}
+      FORGEFLOW_GITHUB_OAUTH_REDIRECT_URL: ${FORGEFLOW_GITHUB_OAUTH_REDIRECT_URL:-http://localhost:18080/api/v1/auth/github/callback}
+      FORGEFLOW_GITHUB_APP_PRIVATE_KEY_FILE: /forgeflow-app.private-key.pem
+      FORGEFLOW_ATTACHMENTS_DIR: /var/lib/forgeflow/attachments
+      FORGEFLOW_ATTACHMENT_STORAGE: ${FORGEFLOW_ATTACHMENT_STORAGE:-local}
+      FORGEFLOW_ATTACHMENT_S3_ENDPOINT: ${FORGEFLOW_ATTACHMENT_S3_ENDPOINT:-}
+      FORGEFLOW_ATTACHMENT_S3_ACCESS_KEY: ${FORGEFLOW_ATTACHMENT_S3_ACCESS_KEY:-}
+      FORGEFLOW_ATTACHMENT_S3_SECRET_KEY: ${FORGEFLOW_ATTACHMENT_S3_SECRET_KEY:-}
+      FORGEFLOW_ATTACHMENT_S3_REGION: ${FORGEFLOW_ATTACHMENT_S3_REGION:-us-east-1}
+      FORGEFLOW_ATTACHMENT_S3_BUCKET: ${FORGEFLOW_ATTACHMENT_S3_BUCKET:-}
+      FORGEFLOW_ATTACHMENT_S3_PREFIX: ${FORGEFLOW_ATTACHMENT_S3_PREFIX:-attachments}
+      FORGEFLOW_ATTACHMENT_S3_SECURE: ${FORGEFLOW_ATTACHMENT_S3_SECURE:-true}
+      FORGEFLOW_OTEL_ENDPOINT: http://otel-collector:4318/v1/traces
+      FORGEFLOW_OTEL_SERVICE_NAME: forgeflow-api
+    volumes:
+      - ${FORGEFLOW_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/forgeflow-app.private-key.pem:ro
+      - forgeflow-attachments:/var/lib/forgeflow/attachments
+    ports:
+      - "18080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.136.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4318:4318"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      args:
+        TARGET: worker
+    env_file:
+      - ../.env.local
+    environment:
+      DATABASE_URL: postgres://forgeflow:forgeflow@postgres:5432/forgeflow?sslmode=disable
+      FORGEFLOW_GITHUB_APP_PRIVATE_KEY_FILE: ""
+      FORGEFLOW_RUNNER_URL: ${FORGEFLOW_RUNNER_URL:-}
+      FORGEFLOW_RUNNER_TOKEN: ${FORGEFLOW_RUNNER_TOKEN:-}
+      FORGEFLOW_RUNNER_WORKSPACE_ROOT: /var/lib/forgeflow/workspaces
+    volumes:
+      - forgeflow-workspaces:/var/lib/forgeflow/workspaces
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  runner:
+    profiles: ["autonomous"]
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.runner
+    environment:
+      FORGEFLOW_RUNNER_HTTP_ADDRESS: :8090
+      FORGEFLOW_RUNNER_TOKEN: ${FORGEFLOW_RUNNER_TOKEN:-}
+      FORGEFLOW_GIT_TOKEN: ${FORGEFLOW_GIT_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+    volumes:
+      - forgeflow-workspaces:/var/lib/forgeflow/workspaces
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/health').then(() => process.exit(0)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        FORGEFLOW_BACKEND_URL: ${FORGEFLOW_BACKEND_URL:-http://api:8080}
+        FORGEFLOW_UI_MODE: ${FORGEFLOW_UI_MODE:-new}
+        NEXT_PUBLIC_FORGEFLOW_API_URL: ${NEXT_PUBLIC_FORGEFLOW_API_URL:-}
+        NEXT_PUBLIC_FORGEFLOW_DEV_AUTH: ${NEXT_PUBLIC_FORGEFLOW_DEV_AUTH:-false}
+        NEXT_PUBLIC_FORGEFLOW_ORGANIZATION_ID: ${NEXT_PUBLIC_FORGEFLOW_ORGANIZATION_ID:-}
+        NEXT_PUBLIC_FORGEFLOW_ACTOR_ID: ${NEXT_PUBLIC_FORGEFLOW_ACTOR_ID:-}
+        NEXT_PUBLIC_FORGEFLOW_PROJECT_ID: ${NEXT_PUBLIC_FORGEFLOW_PROJECT_ID:-}
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      FORGEFLOW_UI_MODE: ${FORGEFLOW_UI_MODE:-new}
+      FORGEFLOW_BACKEND_URL: http://api:8080
+    ports:
+      - "13000:3000"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  forgeflow-postgres:
+  forgeflow-attachments:
+  forgeflow-workspaces:

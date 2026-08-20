@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS outbox_events;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS workflow_transitions;
+DROP TABLE IF EXISTS workflow_statuses;
+DROP TABLE IF EXISTS workflows;
+DROP TABLE IF EXISTS organization_memberships;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS workspaces;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS organizations;

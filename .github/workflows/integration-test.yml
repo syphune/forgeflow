@@ -1,0 +1,38 @@
+name: integration-test
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: forgeflow
+          POSTGRES_PASSWORD: forgeflow
+          POSTGRES_DB: forgeflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U forgeflow -d forgeflow"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - run: go run ./cmd/migrate up
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://forgeflow:forgeflow@localhost:5432/forgeflow?sslmode=disable
+      - run: go test -race -tags=integration ./...
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://forgeflow:forgeflow@localhost:5432/forgeflow?sslmode=disable

@@ -1,0 +1,30 @@
+{
+  "name": "@forgeflow/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run src"
+  },
+  "dependencies": {
+    "@forgeflow/api-client": "workspace:*",
+    "@forgeflow/ui": "workspace:*",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "@types/react": "19.1.2",
+    "@types/react-dom": "19.1.2",
+    "eslint": "9.27.0",
+    "eslint-config-next": "16.3.1",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}

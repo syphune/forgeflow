@@ -1,0 +1,1 @@
+-- Data repair migration: keep repaired workflow definitions on rollback.

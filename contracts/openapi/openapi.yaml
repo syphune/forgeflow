@@ -1,0 +1,3439 @@
+openapi: 3.0.3
+info:
+  title: Forgeflow API
+  version: 0.1.0
+servers:
+  - url: /api/v1
+paths:
+  /work-items:
+    get:
+      operationId: listWorkItems
+      summary: List or lexically search work items in the selected project
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+        - { name: status, in: query, schema: { type: string } }
+        - {
+            name: type,
+            in: query,
+            schema: { type: string, enum: [EPIC, STORY, TASK, BUG, SUB_TASK] },
+          }
+        - {
+            name: priority,
+            in: query,
+            schema:
+              { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] },
+          }
+        - {
+            name: assignee_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
+        - { name: sprint_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: repository_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
+        - { name: q, in: query, schema: { type: string, maxLength: 256 } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100 },
+          }
+        - {
+            name: cursor,
+            in: query,
+            schema: { type: string, maxLength: 512 },
+            description: Opaque cursor returned by the previous page,
+          }
+        - {
+            name: include_archived,
+            in: query,
+            schema: { type: boolean, default: false },
+            description: Include archived work items in the result,
+          }
+        - {
+            name: sort,
+            in: query,
+            schema: { type: string, enum: [updated, backlog], default: updated },
+            description: Sort by recent activity or persisted backlog rank,
+          }
+      responses:
+        "200":
+          description: Work items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/WorkItemResponse" },
+                    }
+                  next_cursor: { type: string, nullable: true }
+    post:
+      operationId: createWorkItem
+      summary: Create a work item
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkItemRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItemResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /work-items/{id}:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    get:
+      operationId: getWorkItem
+      summary: Get a work item
+      responses:
+        "200":
+          description: Work item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItemResponse"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+    patch:
+      operationId: updateWorkItem
+      summary: Update editable work-item fields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkItemRequest"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItemResponse"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+    delete:
+      operationId: archiveWorkItem
+      summary: Archive a work item
+      parameters:
+        - {
+            name: expected_version,
+            in: query,
+            required: true,
+            schema: { type: integer, minimum: 1 },
+          }
+      responses:
+        "204": { description: Archived }
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /work-items/{id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: restoreWorkItem
+      summary: Restore an archived work item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Restored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItemResponse"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /work-items/{id}/rank:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: moveWorkItemRank
+      summary: Move a work item up or down in the project backlog
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [direction, expected_version]
+              properties:
+                direction: { type: string, enum: [up, down] }
+                expected_version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Reordered work item
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkItemResponse" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /work-items/{id}/move:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    post:
+      operationId: moveWorkItem
+      summary: Atomically transition and rank a work item in the board
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MoveWorkItemRequest" }
+      responses:
+        "200":
+          description: Moved work item and updated column versions
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/MoveWorkItemResponse" } }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /work-items/{id}/activity:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    get:
+      operationId: listWorkItemActivity
+      summary: List activity for a work item
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: Work item activity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditRecord" }
+  /work-items/{id}/transitions:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: transitionWorkItem
+      summary: Transition a work item through the server-side workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransitionRequest"
+      responses:
+        "200":
+          description: Transitioned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItemResponse"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /work-items/{id}/assignments:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: assignWorkItem
+      summary: Assign a work item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignmentRequest"
+      responses:
+        "200":
+          description: Assigned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkItemResponse"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+  /work-items/{id}/labels:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    get:
+      operationId: listWorkItemLabels
+      responses:
+        "200":
+          description: Labels attached to the work item
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Label" },
+                    }
+    post:
+      operationId: addWorkItemLabel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LabelRequest" }
+      responses:
+        "201":
+          description: Label attached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Label" }
+  /work-items/{id}/custom-fields:
+    parameters:
+      - { $ref: "#/components/parameters/WorkItemID" }
+      - { name: project_id, in: query, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listWorkItemCustomFieldValues
+      responses:
+        "200":
+          description: Typed custom field values
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/CustomFieldValue" } }
+  /work-items/{id}/custom-fields/{field_id}:
+    parameters:
+      - { $ref: "#/components/parameters/WorkItemID" }
+      - { name: field_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: project_id, in: query, required: true, schema: { type: string, format: uuid } }
+    put:
+      operationId: setWorkItemCustomFieldValue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties: { value: { type: string, nullable: true } }
+      responses:
+        "200":
+          description: Updated custom field value
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CustomFieldValue" }
+  /work-items/{id}/labels/{label_id}:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - {
+          name: label_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    delete:
+      operationId: removeWorkItemLabel
+      responses: { "204": { description: Label detached } }
+  /work-items/{id}/comments:
+    parameters:
+      - { $ref: "#/components/parameters/WorkItemID" }
+    get:
+      operationId: listComments
+      responses:
+        "200":
+          description: Comments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Comment" },
+                    }
+    post:
+      operationId: createComment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommentRequest"
+      responses:
+        "201":
+          description: Comment created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Comment" }
+  /work-items/{id}/comments/{comment_id}:
+    parameters:
+      - { $ref: "#/components/parameters/WorkItemID" }
+      - {
+          name: comment_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    patch:
+      operationId: updateComment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommentRequest"
+      responses:
+        "200":
+          description: Comment updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Comment" }
+    delete:
+      operationId: deleteComment
+      responses:
+        "200":
+          description: Comment soft-deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Comment" }
+  /work-items/{id}/links:
+    parameters:
+      - { $ref: "#/components/parameters/WorkItemID" }
+    get:
+      operationId: listWorkItemLinks
+      responses:
+        "200":
+          description: Work item links
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/WorkItemLink" },
+                    }
+    post:
+      operationId: createWorkItemLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkItemLinkRequest"
+      responses:
+        "201":
+          description: Link created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkItemLink" }
+  /work-items/{id}/links/{link_id}:
+    parameters:
+      - { $ref: "#/components/parameters/WorkItemID" }
+      - {
+          name: link_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    delete:
+      operationId: deleteWorkItemLink
+      responses:
+        "204": { description: Link removed }
+  /work-items/{id}/attachments:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    get:
+      operationId: listWorkItemAttachments
+      summary: List work-item attachments
+      responses:
+        "200":
+          description: Attachments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Attachment" }
+    post:
+      operationId: uploadWorkItemAttachment
+      summary: Upload a bounded work-item attachment
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "201":
+          description: Attachment created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Attachment" }
+  /work-items/{id}/attachments/{attachment_id}:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+      - name: attachment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: downloadWorkItemAttachment
+      summary: Download a work-item attachment
+      responses:
+        "200": { description: Attachment bytes }
+    delete:
+      operationId: deleteWorkItemAttachment
+      summary: Delete a work-item attachment
+      responses:
+        "204": { description: Attachment deleted }
+  /work-items/{id}/specification:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    get:
+      operationId: getSpecification
+      summary: Get the structured specification and readiness result
+      responses:
+        "200":
+          description: Specification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpecificationResponse"
+    patch:
+      operationId: updateSpecification
+      summary: Update unverified human-provided specification content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpecificationUpdateRequest"
+      responses:
+        "200":
+          description: Updated specification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpecificationResponse"
+  /work-items/{id}/specification/review:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: reviewSpecification
+      summary: Human-review an immutable specification version
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpecificationReviewRequest" }
+      responses:
+        "200":
+          description: Reviewed specification
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Specification" } }
+        "409": { $ref: "#/components/responses/ConflictError" }
+  /work-items/{id}/specification/versions:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+      - name: limit
+        in: query
+        schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+    get:
+      operationId: listSpecificationFieldVersions
+      summary: List immutable specification field revisions
+      responses:
+        "200":
+          description: Specification field revisions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/SpecificationFieldVersion" }
+  /work-items/{id}/specification/proposals:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: proposeSpecificationField
+      summary: Submit an AI proposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposalRequest"
+      responses:
+        "201":
+          description: Proposal created
+    get:
+      operationId: listSpecificationProposals
+      responses:
+        "200":
+          description: Proposals and their review status
+  /work-items/{id}/specification/proposals/{proposal_id}/accept:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - {
+          name: proposal_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      operationId: acceptSpecificationProposal
+      summary: Accept a proposal as unverified content
+      responses:
+        "200":
+          description: Proposal accepted without human verification
+  /work-items/{id}/specification/proposals/{proposal_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - {
+          name: proposal_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      operationId: rejectSpecificationProposal
+      summary: Reject an AI proposal
+      responses:
+        "200":
+          description: Proposal rejected
+  /work-items/{id}/specification/verifications:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    post:
+      operationId: verifySpecification
+      summary: Explicitly verify a specification field or child record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerificationRequest"
+      responses:
+        "204":
+          description: Verified
+        "403":
+          $ref: "#/components/responses/ValidationError"
+  /work-items/{id}/analyses:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+    get:
+      operationId: listWorkItemAnalyses
+      responses:
+        "200":
+          description: Untrusted AI analyses
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Analysis" } }
+    post:
+      operationId: createWorkItemAnalysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnalysisRequest" }
+      responses:
+        "201":
+          description: Analysis recorded as an untrusted hypothesis
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Analysis" }
+  /me:
+    get:
+      operationId: getMe
+      responses:
+        "200":
+          description: Authenticated actor
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Actor" } }
+  /me/tokens:
+    get:
+      operationId: listPersonalAccessTokens
+      responses:
+        "200":
+          description: Personal access tokens without secret material
+    post:
+      operationId: createPersonalAccessToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/CreateTokenRequest" } }
+      responses:
+        "201":
+          description: Token; the secret is returned only once
+          content:
+            application/json:
+              { schema: { $ref: "#/components/schemas/PersonalAccessToken" } }
+  /me/tokens/{id}:
+    delete:
+      operationId: revokePersonalAccessToken
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      responses: { "204": { description: Revoked } }
+  /auth/github/start:
+    get:
+      operationId: startGitHubOAuth
+      responses: { "302": { description: Redirect to GitHub } }
+  /auth/logout:
+    post:
+      operationId: logout
+      responses:
+        "204": { description: Session revoked and cookies cleared }
+  /auth/github/callback:
+    get:
+      operationId: completeGitHubOAuth
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses: { "302": { description: Redirect after login } }
+  /organizations:
+    get:
+      operationId: listOrganizations
+      responses:
+        "200":
+          description: Organizations available for selection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Organization" }
+  /organizations/current:
+    get:
+      operationId: getCurrentOrganization
+      responses: { "200": { description: Current organization } }
+  /organizations/{id}/authorization:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getOrganizationAuthorization
+      responses:
+        "200":
+          description: Effective organization-scoped authorization
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AuthorizationContext" } }
+  /organizations/current/members:
+    get:
+      operationId: listOrganizationMembers
+      responses: { "200": { description: Organization members } }
+    post:
+      operationId: addOrganizationMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            {
+              schema:
+                { $ref: "#/components/schemas/OrganizationMemberRequest" },
+            }
+      responses: { "201": { description: Organization member added } }
+  /organizations/current/members/{user_id}:
+    parameters:
+      - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      operationId: setOrganizationMemberRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/MemberRoleRequest" } }
+      responses:
+        "200":
+          description: Updated organization member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+    delete:
+      operationId: removeOrganizationMember
+      responses:
+        "204": { description: Organization member removed }
+        "409": { $ref: "#/components/responses/ConflictError" }
+  /workspaces:
+    get:
+      operationId: listWorkspaces
+      responses:
+        "200":
+          description: Workspaces
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Workspace" }
+    post:
+      operationId: createWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/CreateTenantRequest" } }
+      responses: { "201": { description: Workspace created } }
+  /workspaces/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: updateWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/RenameRequest" } }
+      responses:
+        "200":
+          description: Workspace updated
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Workspace" } }
+  /workspaces/{id}/authorization:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getWorkspaceAuthorization
+      responses:
+        "200":
+          description: Effective workspace-scoped authorization
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AuthorizationContext" } }
+  /projects:
+    get:
+      operationId: listProjects
+      parameters:
+        - {
+            name: workspace_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
+      responses:
+        "200":
+          description: Projects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Project" }
+    post:
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/CreateProjectRequest" } }
+      responses: { "201": { description: Project created } }
+  /projects/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: updateProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/RenameRequest" } }
+      responses:
+        "200":
+          description: Project updated
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Project" } }
+  /projects/{id}/authorization:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getProjectAuthorization
+      responses:
+        "200":
+          description: Effective project-scoped authorization
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AuthorizationContext" } }
+  /projects/{id}/members:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: listProjectMembers
+      responses:
+        "200":
+          description: Organization members available to the project
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Member" },
+                    }
+  /projects/{id}/custom-fields:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listCustomFields
+      responses:
+        "200":
+          description: Project custom field definitions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/CustomFieldDefinition" } }
+    post:
+      operationId: createCustomField
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateCustomFieldRequest" }
+      responses:
+        "201":
+          description: Custom field created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CustomFieldDefinition" }
+  /projects/{id}/custom-fields/{field_id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: field_id, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: updateCustomField
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateCustomFieldRequest" }
+      responses:
+        "200":
+          description: Updated custom field
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CustomFieldDefinition" }
+    delete:
+      operationId: deleteCustomField
+      responses: { "204": { description: Custom field deleted } }
+  /projects/{id}/members/{user_id}:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: user_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    put:
+      operationId: setProjectMemberRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/MemberRoleRequest" } }
+      responses:
+        "200":
+          description: Updated project member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+    delete:
+      operationId: removeProjectMemberRole
+      responses:
+        "204": { description: Project-specific role removed }
+  /workflows/current:
+    get:
+      operationId: getCurrentWorkflow
+      summary: Read the workflow projected for the selected project
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Workflow statuses and transitions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowResponse" }
+    put:
+      operationId: saveCurrentWorkflow
+      summary: Replace the selected project's workflow definition
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SaveWorkflowRequest" }
+      responses:
+        "200":
+          description: Workflow saved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowResponse" }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /workflows/current/statuses:
+    get:
+      operationId: listWorkflowStatuses
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Workflow statuses
+  /workflows/current/transitions:
+    get:
+      operationId: listWorkflowTransitions
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Workflow transitions and typed rules
+  /boards/current:
+    get:
+      operationId: getCurrentBoard
+      summary: Read the board projection for the selected project
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Board columns projected from workflow statuses
+  /sprints:
+    get:
+      operationId: listSprints
+      parameters: [{ $ref: "#/components/parameters/ProjectIDHeader" }]
+      responses:
+        "200":
+          description: Sprints
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Sprint" } }
+    post:
+      operationId: createSprint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/CreateSprintRequest" } }
+      responses:
+        "201":
+          description: Sprint created
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Sprint" } }
+  /sprints/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { $ref: "#/components/parameters/ProjectIDHeader" }
+    patch:
+      operationId: updateSprint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/CreateSprintRequest" } }
+      responses:
+        "200":
+          description: Sprint updated
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Sprint" } }
+    delete:
+      operationId: deleteSprint
+      responses: { "204": { description: Sprint deleted } }
+  /sprints/{id}/start:
+    post:
+      operationId: startSprint
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Sprint started
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Sprint" } }
+  /sprints/{id}/complete:
+    post:
+      operationId: completeSprint
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Sprint completed
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Sprint" } }
+  /agent-runs:
+    get:
+      operationId: listAgentRuns
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+        - {
+            name: work_item_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
+      responses: { "200": { description: AgentRuns } }
+    post:
+      operationId: createAgentRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/CreateAgentRunRequest" } }
+      responses:
+        "201":
+          description: AgentRun created
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AgentRun" } }
+  /agent-runs/{id}:
+    get:
+      operationId: getAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: AgentRun with steps and artifacts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, steps, artifacts]
+                properties:
+                  run: { $ref: "#/components/schemas/AgentRun" }
+                  steps: { type: array, items: { $ref: "#/components/schemas/AgentRunStep" } }
+                  artifacts: { type: array, items: { $ref: "#/components/schemas/AgentRunArtifact" } }
+  /agent-runs/{id}/approve:
+    post:
+      operationId: approveAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AgentRun" } }
+  /agent-runs/{id}/start:
+    post:
+      operationId: startAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Started
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AgentRun" } }
+  /agent-runs/{id}/heartbeat:
+    post:
+      operationId: heartbeatAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: AgentRun heartbeat accepted
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AgentRun" } }
+  /agent-runs/{id}/resume:
+    post:
+      operationId: resumeAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Interrupted AgentRun resumed
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AgentRun" } }
+  /agent-runs/{id}/transition:
+    post:
+      operationId: transitionAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/AgentRunStatus" }
+      responses: { "200": { description: AgentRun transitioned } }
+  /agent-runs/{id}/cancel:
+    post:
+      operationId: cancelAgentRun
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses: { "200": { description: Cancelled } }
+  /agent-runs/{id}/result:
+    post:
+      operationId: attachAgentRunResult
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/AgentRunResultRequest" } }
+      responses:
+        "200": { description: AgentRun result attached }
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /agent-runs/{id}/test-results:
+    post:
+      operationId: recordAgentRunTestResults
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/AgentRunTestResultsRequest" } }
+      responses:
+        "200": { description: AgentRun test results recorded }
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /agent-runs/{id}/steps:
+    post:
+      operationId: attachAgentRunStep
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/AgentRunStep" } }
+      responses:
+        "201":
+          description: AgentRun step attached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRunStep" }
+  /agent-runs/{id}/artifacts:
+    post:
+      operationId: attachAgentRunArtifact
+      parameters:
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/AgentRunArtifact" } }
+      responses:
+        "201":
+          description: AgentRun artifact attached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRunArtifact" }
+  /autonomous-runs:
+    get:
+      operationId: listAutonomousRuns
+      summary: List autonomous workflows in the selected project
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+        - { name: work_item_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Autonomous workflows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutonomousRun" }
+    post:
+      operationId: startAutonomousRun
+      summary: Start a policy-authorized autonomous workflow
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutonomousStartRequest" }
+      responses:
+        "201":
+          description: Autonomous workflow created
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousRun" } }
+  /autonomous-runs/{id}:
+    get:
+      operationId: getAutonomousRun
+      parameters:
+        - { $ref: "#/components/parameters/AutonomousRunID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Autonomous workflow and feedback
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, feedback]
+                properties:
+                  run: { $ref: "#/components/schemas/AutonomousRun" }
+                  feedback:
+                    type: array
+                    items: { $ref: "#/components/schemas/AutonomousFeedback" }
+  /autonomous-runs/{id}/resume:
+    post:
+      operationId: resumeAutonomousRun
+      parameters:
+        - { $ref: "#/components/parameters/AutonomousRunID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Autonomous workflow resumed
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousRun" } }
+  /autonomous-runs/{id}/retry:
+    post:
+      operationId: retryAutonomousRun
+      parameters:
+        - { $ref: "#/components/parameters/AutonomousRunID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutonomousRetryRequest" }
+      responses:
+        "200":
+          description: Autonomous workflow retried
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousRun" } }
+  /autonomous-runs/{id}/cancel:
+    post:
+      operationId: cancelAutonomousRun
+      parameters:
+        - { $ref: "#/components/parameters/AutonomousRunID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Autonomous workflow cancelled
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousRun" } }
+  /autonomous-runs/{id}/feedback:
+    post:
+      operationId: addAutonomousFeedback
+      parameters:
+        - { $ref: "#/components/parameters/AutonomousRunID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutonomousFeedbackRequest" }
+      responses:
+        "201":
+          description: Feedback added
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousFeedback" } }
+  /autonomous-runs/{id}/test-results:
+    post:
+      operationId: recordAutonomousTestResults
+      parameters:
+        - { $ref: "#/components/parameters/AutonomousRunID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentRunTestResultsRequest" }
+      responses:
+        "200":
+          description: Test results recorded
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousRun" } }
+  /projects/{id}/ai-policy:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+    get:
+      operationId: getProjectAIPolicy
+      responses:
+        "200":
+          description: Project autonomous policy
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousPolicy" } }
+    put:
+      operationId: updateProjectAIPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutonomousPolicy" }
+      responses:
+        "200":
+          description: Project autonomous policy updated
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/AutonomousPolicy" } }
+  /projects/{id}/environments:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+    get:
+      operationId: listProjectEnvironments
+      responses:
+        "200":
+          description: Project environments
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Environment" }
+    post:
+      operationId: createProjectEnvironment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateEnvironmentRequest" }
+      responses:
+        "201":
+          description: Environment created
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Environment" } }
+  /deployments:
+    post:
+      operationId: requestDeployment
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDeploymentRequest" }
+      responses:
+        "201":
+          description: Deployment request created
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeploymentRequest" } }
+  /deployments/{id}:
+    get:
+      operationId: getDeployment
+      parameters:
+        - { $ref: "#/components/parameters/DeploymentID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Deployment request
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeploymentRequest" } }
+  /deployments/{id}/approve:
+    post:
+      operationId: approveDeployment
+      parameters:
+        - { $ref: "#/components/parameters/DeploymentID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Deployment approved
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeploymentRequest" } }
+  /deployments/{id}/status:
+    post:
+      operationId: updateDeploymentStatus
+      parameters:
+        - { $ref: "#/components/parameters/DeploymentID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeploymentStatusRequest" }
+      responses:
+        "200":
+          description: Deployment status updated
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeploymentRequest" } }
+  /audit:
+    get:
+      operationId: listAuditRecords
+      parameters:
+        - { name: resource_type, in: query, schema: { type: string } }
+        - { name: resource_id, in: query, schema: { type: string } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100 },
+          }
+      responses: { "200": { description: Append-only audit records } }
+  /mcp:
+    post:
+      operationId: mcpStreamableHTTP
+      summary: Authenticated MCP Streamable HTTP transport
+      description: Requires a scoped Bearer PAT and optional X-Project-ID header.
+      responses:
+        "200": { description: MCP protocol response }
+        "401": { $ref: "#/components/responses/UnauthorizedError" }
+  /integrations/github/webhooks:
+    post:
+      operationId: receiveGitHubWebhook
+      security: []
+      parameters:
+        - {
+            name: X-GitHub-Delivery,
+            in: header,
+            required: true,
+            schema: { type: string },
+          }
+        - {
+            name: X-GitHub-Event,
+            in: header,
+            required: true,
+            schema: { type: string },
+          }
+        - {
+            name: X-Hub-Signature-256,
+            in: header,
+            required: true,
+            schema: { type: string },
+          }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { type: object, additionalProperties: true } }
+      responses:
+        { "202": { description: Accepted and deduplicated by delivery ID } }
+  /integrations/github/install/start:
+    get:
+      operationId: startGitHubAppInstallation
+      summary: Start the GitHub App installation flow
+      responses:
+        "302": { description: Redirect to GitHub App installation }
+        "503": { $ref: "#/components/responses/ValidationError" }
+  /integrations/github/install/callback:
+    get:
+      operationId: completeGitHubAppInstallation
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - {
+            name: installation_id,
+            in: query,
+            required: true,
+            schema: { type: integer, format: int64 },
+          }
+        - {
+            name: setup_action,
+            in: query,
+            required: true,
+            schema: { type: string, enum: [install, update] },
+          }
+      responses:
+        "302": { description: Redirect back to Forgeflow }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /integrations/github/repositories:
+    get:
+      operationId: listGitHubRepositories
+      summary: Sync and list repositories available to the organization
+      parameters:
+        - {
+            name: project_id,
+            in: query,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      responses:
+        "200":
+          description: Available GitHub repositories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/GitHubRepository" },
+                    }
+  /integrations/github/installations:
+    get:
+      operationId: listGitHubInstallations
+      summary: List GitHub App installations linked to the organization
+      responses:
+        "200":
+          description: GitHub App installations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/GitHubInstallation" }
+  /projects/{id}/repositories:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: listProjectRepositories
+      summary: List repositories linked to a project
+      responses:
+        "200":
+          description: Linked repositories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/GitHubRepository" },
+                    }
+    post:
+      operationId: linkProjectRepository
+      summary: Link a GitHub repository to a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/RepositoryLinkRequest" } }
+      responses: { "204": { description: Repository linked } }
+  /projects/{id}/repositories/{repository_id}:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    delete:
+      operationId: unlinkProjectRepository
+      summary: Unlink a GitHub repository from a project
+      responses: { "204": { description: Repository unlinked } }
+  /projects/{id}/repositories/{repository_id}/context:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: getRepositoryContext
+      summary: Read synchronized repository branches, pull requests, and CI runs
+      responses:
+        "200":
+          description: Repository engineering context
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositoryContext" }
+  /projects/{id}/repositories/{repository_id}/pull-requests:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      operationId: createDraftPullRequest
+      summary: Create a human-reviewable draft pull request
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDraftPullRequestRequest" }
+      responses:
+        "201":
+          description: Draft pull request created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositoryPullRequest" }
+  /projects/{id}/repositories/{repository_id}/tree:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: getRepositoryTree
+      summary: Read bounded files from the repository default branch
+      responses:
+        "200":
+          description: Repository tree
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RepositoryTreeEntry" } }
+  /projects/{id}/repositories/{repository_id}/file:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: getRepositoryFile
+      parameters:
+        - {
+            name: path,
+            in: query,
+            required: true,
+            schema: { type: string, maxLength: 1024 },
+          }
+      responses:
+        "200":
+          description: Repository file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositoryFile" }
+  /projects/{id}/repositories/{repository_id}/search:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: searchRepository
+      parameters:
+        - {
+            name: q,
+            in: query,
+            required: true,
+            schema: { type: string, minLength: 1, maxLength: 256 },
+          }
+        - { name: limit, in: query, schema: { type: integer, maximum: 50 } }
+      responses:
+        "200":
+          description: Repository search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RepositorySearchMatch" } }
+  /projects/{id}/repositories/{repository_id}/related-files:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: listRelatedRepositoryFiles
+      parameters:
+        - {
+            name: path,
+            in: query,
+            required: true,
+            schema: { type: string, maxLength: 1024 },
+          }
+        - { name: limit, in: query, schema: { type: integer, maximum: 50 } }
+      responses: { "200": { description: Related repository files } }
+  /projects/{id}/repositories/{repository_id}/snapshots:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      operationId: listRepositorySnapshots
+      summary: List fixed-commit repository snapshots
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50 } }
+      responses:
+        "200":
+          description: Repository snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RepositorySnapshot" } }
+  /projects/{id}/repositories/{repository_id}/snapshots/refresh:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: refreshRepositorySnapshot
+      summary: Index the repository at its current fixed commit
+      responses:
+        "202":
+          description: Snapshot created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositorySnapshot" }
+  /projects/{id}/repositories/{repository_id}/snapshots/{snapshot_id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: snapshot_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getRepositorySnapshot
+      responses:
+        "200":
+          description: Repository snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositorySnapshot" }
+  /projects/{id}/repositories/{repository_id}/snapshots/{snapshot_id}/file:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: snapshot_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getRepositorySnapshotFile
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string, maxLength: 1024 } }
+      responses:
+        "200":
+          description: File from a fixed snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SnapshotFile" }
+  /projects/{id}/repositories/{repository_id}/snapshots/{snapshot_id}/search:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: snapshot_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: searchRepositorySnapshot
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 256 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50 } }
+      responses:
+        "200":
+          description: Snapshot search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/SnapshotFile" } }
+  /projects/{id}/repositories/{repository_id}/snapshots/{snapshot_id}/symbols:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: snapshot_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listRepositorySnapshotSymbols
+      parameters:
+        - { name: name, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: Snapshot symbols
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/SnapshotSymbol" } }
+  /projects/{id}/repositories/{repository_id}/snapshots/{snapshot_id}/edges:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: snapshot_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listRepositorySnapshotEdges
+      summary: List extracted import edges from a fixed snapshot
+      parameters:
+        - { name: from, in: query, schema: { type: string, maxLength: 1024 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: Snapshot import edges
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/SnapshotEdge" } }
+  /projects/{id}/repositories/{repository_id}/knowledge:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listRepositoryKnowledge
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50 } }
+      responses:
+        "200":
+          description: Repository knowledge documents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/KnowledgeDocument" } }
+    post:
+      operationId: createRepositoryKnowledge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KnowledgeRequest" }
+      responses:
+        "201":
+          description: Knowledge document created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KnowledgeDocument" }
+  /projects/{id}/repositories/{repository_id}/knowledge/{document_id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: document_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getRepositoryKnowledge
+      responses:
+        "200":
+          description: Knowledge document
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KnowledgeDocument" }
+  /projects/{id}/repositories/{repository_id}/knowledge/{document_id}/revisions:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: document_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listRepositoryKnowledgeRevisions
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: Immutable knowledge revision history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/KnowledgeRevision" } }
+    post:
+      operationId: appendRepositoryKnowledgeRevision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KnowledgeRevisionRequest" }
+      responses:
+        "201":
+          description: Knowledge revision appended
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KnowledgeRevision" }
+  /notifications:
+    get:
+      operationId: listNotifications
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: Actor-scoped notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+  /notifications/unread-count:
+    get:
+      operationId: getUnreadNotificationCount
+      responses:
+        "200":
+          description: Actor-scoped unread notification count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unread_count]
+                properties:
+                  unread_count: { type: integer, minimum: 0 }
+  /notifications/{id}/read:
+    post:
+      operationId: markNotificationRead
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses: { "204": { description: Notification marked as read } }
+  /notifications/read-all:
+    post:
+      operationId: markAllNotificationsRead
+      responses: { "204": { description: Notifications marked as read } }
+  /projects/{id}/automation-rules:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listAutomationRules
+      responses:
+        "200":
+          description: Project automation rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AutomationRule" } }
+    post:
+      operationId: createAutomationRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAutomationRuleRequest" }
+      responses:
+        "201":
+          description: Automation rule created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationRule" }
+  /projects/{id}/automation-rules/{rule_id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: rule_id, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: toggleAutomationRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties: { enabled: { type: boolean } }
+      responses:
+        "200":
+          description: Automation rule updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutomationRule" }
+    delete:
+      operationId: deleteAutomationRule
+      responses: { "204": { description: Automation rule deleted } }
+components:
+  parameters:
+    WorkItemID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AutonomousRunID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DeploymentID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectPathID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectIDHeader:
+      name: X-Project-ID
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, minLength: 1, maxLength: 200 }
+  responses:
+    UnauthorizedError:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ForbiddenError:
+      description: Permission denied
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ConflictError:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFoundError:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    CreateWorkItemRequest:
+      type: object
+      required: [project_id, type, title]
+      properties:
+        project_id: { type: string, format: uuid }
+        type: { type: string, enum: [EPIC, STORY, TASK, BUG, SUB_TASK] }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 20000 }
+        repository_id: { type: string, format: uuid }
+        parent_id: { type: string, format: uuid }
+        assignee_id: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] }
+        due_at: { type: string, format: date-time, nullable: true }
+        estimate_points:
+          { type: integer, minimum: 0, maximum: 100, nullable: true }
+        sprint_id: { type: string, format: uuid, nullable: true }
+    UpdateWorkItemRequest:
+      type: object
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 20000 }
+        parent_id: { type: string, format: uuid, nullable: true }
+        repository_id: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] }
+        due_at: { type: string, format: date-time, nullable: true }
+        estimate_points:
+          { type: integer, minimum: 0, maximum: 100, nullable: true }
+        sprint_id: { type: string, format: uuid, nullable: true }
+        expected_version: { type: integer, minimum: 1 }
+    TransitionRequest:
+      type: object
+      required: [transition_key, expected_version]
+      properties:
+        transition_key: { type: string }
+        expected_version: { type: integer, minimum: 1 }
+    AssignmentRequest:
+      type: object
+      required: [assignee_id, expected_version]
+      properties:
+        assignee_id:
+          {
+            type: string,
+            format: uuid,
+            nullable: true,
+            description: Empty string or null unassigns the item,
+          }
+        expected_version: { type: integer, minimum: 1 }
+    SpecificationUpdateRequest:
+      type: object
+      properties:
+        expected_version: { type: integer, minimum: 1 }
+        summary: { type: string }
+        fields: { type: object, additionalProperties: { type: string } }
+        reproduction_steps: { type: array, items: { $ref: "#/components/schemas/ReproductionStep" } }
+        acceptance_criteria: { type: array, items: { $ref: "#/components/schemas/AcceptanceCriterion" } }
+        regression_test_cases:
+          { type: array, items: { $ref: "#/components/schemas/RegressionTestCase" } }
+        context_refs:
+          { type: array, items: { $ref: "#/components/schemas/SpecificationContextRef" } }
+        media_refs:
+          type: object
+          maxProperties: 100
+          additionalProperties:
+            type: array
+            maxItems: 10
+            items: { type: string, maxLength: 512 }
+        repository_id: { type: string, format: uuid }
+    SpecificationReviewRequest:
+      type: object
+      required: [expected_version]
+      properties:
+        expected_version: { type: integer, minimum: 1 }
+    ProposalRequest:
+      type: object
+      required: [field, value, provenance]
+      properties:
+        field: { type: string }
+        value: { type: string }
+        provenance: { type: string, enum: [AI_INFERRED, AI_HYPOTHESIS] }
+    VerificationRequest:
+      type: object
+      properties:
+        kind:
+          {
+            type: string,
+            enum: [field, reproduction_step, acceptance_criterion, regression_case],
+          }
+        field: { type: string }
+        position: { type: integer, minimum: 1 }
+    WorkItemResponse:
+      type: object
+      required: [id, key, title, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string }
+        title: { type: string }
+        description: { type: string }
+        status: { type: string }
+        version: { type: integer }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        type: { type: string }
+        parent_id: { type: string, format: uuid, nullable: true }
+        priority: { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] }
+        assignee_id: { type: string, format: uuid, nullable: true }
+        reporter_id: { type: string, format: uuid, nullable: true }
+        due_at: { type: string, format: date-time, nullable: true }
+        estimate_points: { type: integer, minimum: 0, nullable: true }
+        backlog_rank: { type: integer, format: int64 }
+        repository_id: { type: string, format: uuid, nullable: true }
+        sprint_id: { type: string, format: uuid, nullable: true }
+        archived_at: { type: string, format: date-time, nullable: true }
+        archived_by: { type: string, nullable: true }
+    WorkflowStatus:
+      type: object
+      required: [key, display_name, category, position, is_terminal]
+      properties:
+        key: { type: string, pattern: "^[A-Z][A-Z0-9_]{1,31}$" }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        category: { type: string, enum: [TODO, IN_PROGRESS, DONE, CANCELLED] }
+        position: { type: integer }
+        is_terminal: { type: boolean }
+    WorkflowTransition:
+      type: object
+      required: [key, from_status, to_status, display_name]
+      properties:
+        key: { type: string, pattern: "^[a-z][a-z0-9_]{1,63}$" }
+        from_status: { type: string }
+        to_status: { type: string }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        required_rules:
+          type: array
+          items:
+            type: string
+            enum: [require_specification_ready, require_human_verification, require_assignee, require_repository, require_pull_request, require_ci_success, require_permission]
+        required_permissions:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            pattern: "^[a-z][a-z0-9_.]{1,127}$"
+    SaveWorkflowRequest:
+      type: object
+      required: [name, statuses, transitions]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        statuses:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: "#/components/schemas/WorkflowStatus" }
+        transitions:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/WorkflowTransition" }
+    WorkflowResponse:
+      type: object
+      required: [id, name, statuses, transitions]
+      properties:
+        id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        statuses:
+          type: array
+          items: { $ref: "#/components/schemas/WorkflowStatus" }
+        transitions:
+          type: array
+          items: { $ref: "#/components/schemas/WorkflowTransition" }
+    AuditRecord:
+      type: object
+      required: [id, actor_type, actor_id, action, resource_type, resource_id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        actor_type: { type: string }
+        actor_id: { type: string }
+        source: { type: string }
+        action: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        before: { nullable: true }
+        after: { nullable: true }
+        request_id: { type: string }
+        correlation_id: { type: string }
+        created_at: { type: string, format: date-time }
+    GitHubRepository:
+      type: object
+      required:
+        [
+          id,
+          github_repository_id,
+          full_name,
+          default_branch,
+          installation_id,
+          linked,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        github_repository_id: { type: integer, format: int64 }
+        full_name: { type: string }
+        default_branch: { type: string }
+        clone_url: { type: string, format: uri }
+        installation_id: { type: integer, format: int64 }
+        installation_account: { type: string }
+        linked: { type: boolean }
+    GitHubInstallation:
+      type: object
+      required: [id, github_installation_id, account_login, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        github_installation_id: { type: integer, format: int64 }
+        account_login: { type: string }
+        created_at: { type: string, format: date-time }
+    RepositoryContext:
+      type: object
+      required: [repository, branches, commits, pull_requests, ci_runs]
+      properties:
+        repository: { $ref: "#/components/schemas/GitHubRepository" }
+        branches:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/RepositoryBranch" },
+          }
+        commits:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/RepositoryCommit" },
+          }
+        pull_requests:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/RepositoryPullRequest" },
+          }
+        ci_runs:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/RepositoryCIRun" },
+          }
+    RepositoryBranch:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        name: { type: string }
+        head_sha: { type: string }
+        updated_at: { type: string, format: date-time }
+    RepositoryCommit:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        sha: { type: string }
+        message: { type: string }
+        author_login: { type: string }
+        committed_at: { type: string, format: date-time, nullable: true }
+    RepositoryTreeEntry:
+      type: object
+      required: [path, type, size, sha]
+      properties:
+        path: { type: string }
+        type: { type: string }
+        size: { type: integer, minimum: 0 }
+        sha: { type: string }
+    RepositoryFile:
+      type: object
+      required: [path, type, size, sha, ref, content]
+      properties:
+        path: { type: string }
+        type: { type: string }
+        size: { type: integer, minimum: 0 }
+        sha: { type: string }
+        ref: { type: string }
+        content: { type: string }
+    RepositorySearchMatch:
+      type: object
+      required: [path, sha, line, snippet]
+      properties:
+        path: { type: string }
+        sha: { type: string }
+        line: { type: integer, minimum: 1 }
+        snippet: { type: string }
+    MoveWorkItemRequest:
+      type: object
+      required: [target_status, expected_version, expected_source_ordering_version, expected_destination_ordering_version]
+      properties:
+        target_status: { type: string }
+        transition_key: { type: string }
+        before_id: { type: string, format: uuid }
+        after_id: { type: string, format: uuid }
+        expected_version: { type: integer, minimum: 1 }
+        expected_source_ordering_version: { type: integer, minimum: 1 }
+        expected_destination_ordering_version: { type: integer, minimum: 1 }
+    MoveWorkItemResponse:
+      type: object
+      required: [item, source_ordering_version, destination_ordering_version]
+      properties:
+        item: { $ref: "#/components/schemas/WorkItemResponse" }
+        source_ordering_version: { type: integer, format: int64, minimum: 1 }
+        destination_ordering_version: { type: integer, format: int64, minimum: 1 }
+    RepositoryPullRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid, nullable: true }
+        number: { type: integer, format: int64 }
+        title: { type: string }
+        state: { type: string }
+        draft: { type: boolean }
+        head_sha: { type: string }
+        head_ref: { type: string }
+        body: { type: string }
+        url: { type: string, format: uri }
+        updated_at: { type: string, format: date-time }
+    CreateDraftPullRequestRequest:
+      type: object
+      required: [title, head]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 256 }
+        body: { type: string, maxLength: 131072 }
+        head: { type: string, minLength: 1, maxLength: 255 }
+        base: { type: string, maxLength: 255 }
+    RepositoryCIRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        external_id: { type: string }
+        status: { type: string }
+        conclusion: { type: string }
+        sha: { type: string }
+        url: { type: string, format: uri }
+        updated_at: { type: string, format: date-time }
+    RepositorySnapshot:
+      type: object
+      required: [id, project_id, repository_id, commit_sha, ref_name, status]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        commit_sha: { type: string }
+        ref_name: { type: string }
+        status: { type: string, enum: [RUNNING, READY, FAILED] }
+        file_count: { type: integer, minimum: 0 }
+        symbol_count: { type: integer, minimum: 0 }
+        skipped_count: { type: integer, minimum: 0 }
+        error_message: { type: string }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    SnapshotFile:
+      type: object
+      required: [path, language, size, content_hash]
+      properties:
+        path: { type: string }
+        language: { type: string }
+        size: { type: integer, minimum: 0 }
+        content_hash: { type: string }
+        content: { type: string }
+    SnapshotSymbol:
+      type: object
+      required: [path, name, qualified_name, kind, start_line, end_line, confidence, provenance]
+      properties:
+        path: { type: string }
+        name: { type: string }
+        qualified_name: { type: string }
+        kind: { type: string }
+        start_line: { type: integer, minimum: 1 }
+        end_line: { type: integer, minimum: 1 }
+        confidence: { type: string }
+        provenance: { type: string }
+    SnapshotEdge:
+      type: object
+      required: [from, to, kind, confidence, provenance]
+      properties:
+        from: { type: string }
+        to: { type: string }
+        kind: { type: string }
+        confidence: { type: string }
+        provenance: { type: string }
+    KnowledgeRevision:
+      type: object
+      required: [id, document_id, revision_number, content, provenance, created_by, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        revision_number: { type: integer, minimum: 1 }
+        content: { type: string }
+        provenance: { type: string, enum: [MANUAL, EXTRACTED, AI_PROPOSED, HUMAN_VERIFIED] }
+        source_snapshot_id: { type: string, format: uuid, nullable: true }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+    KnowledgeDocument:
+      type: object
+      required: [id, project_id, slug, title, kind, current_provenance, created_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid, nullable: true }
+        slug: { type: string }
+        title: { type: string }
+        kind: { type: string, enum: [ARCHITECTURE, CONVENTIONS, TESTING, DOMAIN_RULES, KNOWN_ISSUES, MODULE] }
+        current_provenance: { type: string, enum: [MANUAL, EXTRACTED, AI_PROPOSED, HUMAN_VERIFIED] }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        latest_revision: { $ref: "#/components/schemas/KnowledgeRevision" }
+    KnowledgeRequest:
+      type: object
+      required: [slug, title, kind, content, provenance]
+      properties:
+        slug: { type: string, maxLength: 96 }
+        title: { type: string, maxLength: 160 }
+        kind: { type: string, enum: [ARCHITECTURE, CONVENTIONS, TESTING, DOMAIN_RULES, KNOWN_ISSUES, MODULE] }
+        content: { type: string, maxLength: 524288 }
+        provenance: { type: string, enum: [MANUAL, EXTRACTED, AI_PROPOSED, HUMAN_VERIFIED] }
+        source_snapshot_id: { type: string, format: uuid, nullable: true }
+    KnowledgeRevisionRequest:
+      type: object
+      required: [content, provenance]
+      properties:
+        content: { type: string, maxLength: 524288 }
+        provenance: { type: string, enum: [MANUAL, EXTRACTED, AI_PROPOSED, HUMAN_VERIFIED] }
+        source_snapshot_id: { type: string, format: uuid, nullable: true }
+    RepositoryLinkRequest:
+      type: object
+      required: [repository_id]
+      properties:
+        repository_id: { type: string, format: uuid }
+    LabelRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 50 }
+        color: { type: string, pattern: "^#[0-9A-Fa-f]{6}$" }
+    Label:
+      type: object
+      required: [id, name, color]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        color: { type: string }
+    CreateCustomFieldRequest:
+      type: object
+      required: [key, display_name, value_type]
+      properties:
+        key: { type: string, pattern: "^[A-Z][A-Z0-9_]{0,31}$" }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        value_type: { type: string, enum: [TEXT, NUMBER, BOOLEAN, DATE, SELECT] }
+        options: { type: array, items: { type: string, maxLength: 120 }, maxItems: 50 }
+        required: { type: boolean, default: false }
+    UpdateCustomFieldRequest:
+      type: object
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        options: { type: array, items: { type: string, maxLength: 120 }, maxItems: 50 }
+        required: { type: boolean }
+    CustomFieldDefinition:
+      type: object
+      required: [id, project_id, key, display_name, value_type, required]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        key: { type: string }
+        display_name: { type: string }
+        value_type: { type: string, enum: [TEXT, NUMBER, BOOLEAN, DATE, SELECT] }
+        options: { type: array, items: { type: string } }
+        required: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CustomFieldValue:
+      allOf:
+        - $ref: "#/components/schemas/CustomFieldDefinition"
+        - type: object
+          required: [definition_id, work_item_id, value]
+          properties:
+            definition_id: { type: string, format: uuid }
+            work_item_id: { type: string, format: uuid }
+            value: { type: string }
+            updated_at: { type: string, format: date-time }
+    Attachment:
+      type: object
+      required: [id, project_id, work_item_id, name, content_type, sha256, size_bytes, created_by, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        name: { type: string }
+        content_type: { type: string }
+        sha256: { type: string }
+        size_bytes: { type: integer, format: int64, minimum: 0 }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+    Member:
+      type: object
+      required: [id, login, display_name, role_key, project_role]
+      properties:
+        id: { type: string, format: uuid }
+        login: { type: string }
+        display_name: { type: string }
+        role_key: { type: string }
+        project_role: { type: boolean }
+    Organization:
+      type: object
+      required: [id, slug, display_name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+    Workspace:
+      type: object
+      required: [id, organization_id, key, display_name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        key: { type: string }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+    Project:
+      type: object
+      required: [id, organization_id, workspace_id, key, display_name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        key: { type: string }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+    MemberRoleRequest:
+      type: object
+      required: [role_key]
+      properties:
+        user_id: { type: string, format: uuid }
+        role_key:
+          {
+            type: string,
+            enum: [owner, admin, project_manager, developer, qa, viewer],
+          }
+    OrganizationMemberRequest:
+      type: object
+      required: [login, role_key]
+      properties:
+        login: { type: string, minLength: 1, maxLength: 120 }
+        role_key:
+          {
+            type: string,
+            enum: [owner, admin, project_manager, developer, qa, viewer],
+          }
+    SpecificationResponse:
+      type: object
+      properties:
+        specification:
+          allOf:
+            - $ref: "#/components/schemas/Specification"
+          nullable: true
+        readiness:
+          $ref: "#/components/schemas/Readiness"
+    Specification:
+      type: object
+      required: [id, work_item_id, version, summary, fields]
+      properties:
+        id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        reviewed_version: { type: integer, minimum: 0 }
+        reviewed_by: { type: string, format: uuid }
+        reviewed_at: { type: string, format: date-time }
+        summary: { type: string }
+        fields:
+          {
+            type: object,
+            additionalProperties:
+              { $ref: "#/components/schemas/SpecificationField" },
+          }
+        reproduction_steps:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/ReproductionStep" },
+          }
+        acceptance_criteria:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/AcceptanceCriterion" },
+          }
+        regression_test_cases:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/RegressionTestCase" },
+          }
+        context_refs:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/SpecificationContextRef" },
+          }
+        media_refs:
+          type: object
+          maxProperties: 100
+          additionalProperties:
+            type: array
+            maxItems: 10
+            items: { type: string, maxLength: 512 }
+        repository_id: { type: string, format: uuid }
+        updated_at: { type: string, format: date-time }
+    SpecificationField:
+      type: object
+      properties:
+        key: { type: string }
+        value: { type: string }
+        provenance: { type: string }
+        verification_status: { type: string }
+        source_proposal_id: { type: string, format: uuid }
+        verified_by: { type: string }
+        verified_at: { type: string, format: date-time }
+    SpecificationFieldVersion:
+      type: object
+      required: [id, revision, field, value, provenance, verification_status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        revision: { type: integer, minimum: 1 }
+        field: { type: string }
+        value: { type: string }
+        provenance: { type: string }
+        verification_status: { type: string }
+        source_proposal_id: { type: string, format: uuid }
+        verified_by: { type: string, format: uuid }
+        verified_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    ReproductionStep:
+      type: object
+      properties:
+        position: { type: integer }
+        action: { type: string }
+        expected_result: { type: string }
+        observed_result: { type: string }
+        evidence_refs: { type: array, items: { type: string, maxLength: 512 }, maxItems: 30 }
+        provenance: { type: string }
+        verification_status: { type: string }
+    AcceptanceCriterion:
+      type: object
+      properties:
+        position: { type: integer }
+        statement: { type: string }
+        provenance: { type: string }
+        verification_status: { type: string }
+    AnalysisRequest:
+      type: object
+      required: [root_cause_hypothesis, implementation_plan, test_plan, confidence]
+      properties:
+        root_cause_hypothesis: { type: string, maxLength: 20000 }
+        blast_radius: { type: string, maxLength: 20000 }
+        implementation_plan: { type: string, maxLength: 20000 }
+        test_plan: { type: string, maxLength: 20000 }
+        evidence_refs: { type: array, items: { type: string, maxLength: 512 }, maxItems: 30 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+    Analysis:
+      type: object
+      required: [id, work_item_id, root_cause_hypothesis, implementation_plan, test_plan, confidence, provenance, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        root_cause_hypothesis: { type: string }
+        blast_radius: { type: string }
+        implementation_plan: { type: string }
+        test_plan: { type: string }
+        evidence_refs: { type: array, items: { type: string } }
+        confidence: { type: number }
+        provenance: { type: string, enum: [AI_HYPOTHESIS, AI_INFERRED] }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    RegressionTestCase:
+      type: object
+      properties:
+        position: { type: integer }
+        scenario: { type: string }
+        expected_result: { type: string }
+        provenance: { type: string }
+        verification_status: { type: string }
+        verified_by: { type: string, format: uuid }
+        verified_at: { type: string, format: date-time }
+    SpecificationContextRef:
+      type: object
+      properties:
+        repository_id: { type: string, format: uuid }
+        module: { type: string }
+        file: { type: string }
+        symbol: { type: string }
+        commit: { type: string }
+        pull_request: { type: string }
+        rationale: { type: string }
+        provenance: { type: string }
+    Readiness:
+      type: object
+      required: [ready]
+      properties:
+        ready: { type: boolean }
+        reviewed: { type: boolean }
+        specification_version: { type: integer, minimum: 0 }
+        reviewed_version: { type: integer, minimum: 0 }
+        missing: { type: array, items: { type: string } }
+        quality:
+          $ref: "#/components/schemas/QualityDimensions"
+    QualityDimensions:
+      type: object
+      properties:
+        completeness: { type: number, format: double, minimum: 0, maximum: 1 }
+        clarity: { type: number, format: double, minimum: 0, maximum: 1 }
+        reproducibility: { type: number, format: double, minimum: 0, maximum: 1 }
+        evidence_quality: { type: number, format: double, minimum: 0, maximum: 1 }
+        testability: { type: number, format: double, minimum: 0, maximum: 1 }
+        repository_context: { type: number, format: double, minimum: 0, maximum: 1 }
+        human_verification_coverage: { type: number, format: double, minimum: 0, maximum: 1 }
+    ErrorResponse:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        details: {}
+        request_id: { type: string }
+    CommentRequest:
+      type: object
+      required: [body]
+      properties: { body: { type: string, minLength: 1, maxLength: 20000 } }
+    Comment:
+      type: object
+      required: [id, work_item_id, author_id, body, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        author_id: { type: string, format: uuid }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, nullable: true }
+        deleted_by: { type: string, format: uuid }
+    WorkItemLinkRequest:
+      type: object
+      required: [target_id, relation_type]
+      properties:
+        target_id: { type: string, format: uuid }
+        relation_type: { type: string, maxLength: 50 }
+    WorkItemLink:
+      type: object
+      required: [id, source_id, target_id, relation_type]
+      properties:
+        id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        relation_type: { type: string }
+        created_at: { type: string, format: date-time }
+    Actor:
+      type: object
+      required: [id, type, organization_id]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        organization_id: { type: string, format: uuid }
+        source: { type: string }
+    AuthorizationContext:
+      type: object
+      required: [scope, organization_id, capabilities]
+      properties:
+        scope: { type: string, enum: [organization, workspace, project] }
+        organization_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        capabilities: { type: array, items: { type: string } }
+    CreateTokenRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100 }
+        scopes: { type: array, items: { type: string } }
+        expires_in_days:
+          { type: integer, minimum: 1, maximum: 365, default: 90 }
+    PersonalAccessToken:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix: { type: string }
+        token: { type: string, description: Returned only on creation }
+        scopes: { type: array, items: { type: string } }
+        expires_at: { type: string, format: date-time }
+    CreateTenantRequest:
+      type: object
+      required: [key, display_name]
+      properties: { key: { type: string }, display_name: { type: string } }
+    RenameRequest:
+      type: object
+      required: [display_name]
+      properties: { display_name: { type: string, minLength: 1, maxLength: 160 } }
+    CreateProjectRequest:
+      type: object
+      required: [workspace_id, key, display_name]
+      properties:
+        {
+          workspace_id: { type: string, format: uuid },
+          key: { type: string },
+          display_name: { type: string },
+        }
+    CreateSprintRequest:
+      type: object
+      required: [project_id, name]
+      properties:
+        {
+          project_id: { type: string, format: uuid },
+          name: { type: string },
+          goal: { type: string },
+          starts_at: { type: string, format: date, nullable: true },
+          ends_at: { type: string, format: date, nullable: true },
+        }
+    Sprint:
+      type: object
+      required: [id, organization_id, project_id, name, goal, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string }
+        goal: { type: string }
+        starts_at: { type: string, format: date-time, nullable: true }
+        ends_at: { type: string, format: date-time, nullable: true }
+        status: { type: string, enum: [PLANNED, ACTIVE, COMPLETED] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateAgentRunRequest:
+      type: object
+      required: [project_id, work_item_id, repository_id, agent_provider, agent_name]
+      properties:
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        agent_provider: { type: string }
+        agent_name: { type: string }
+        model: { type: string }
+        base_sha: { type: string }
+        branch: { type: string }
+        execution_inputs: { $ref: "#/components/schemas/AgentRunExecutionInputs" }
+        execution_policy: { type: object, additionalProperties: true }
+    AgentRunExecutionInputs:
+      type: object
+      properties:
+        prompt: { type: string, maxLength: 131072 }
+        worktree_diff_hash: { type: string, maxLength: 128 }
+        specification_version: { type: integer, minimum: 0 }
+        test_case_positions: { type: array, items: { type: integer, minimum: 1 }, maxItems: 200 }
+        agent_configuration: { type: object, additionalProperties: true }
+        tool_permissions: { type: array, items: { type: string, maxLength: 256 }, maxItems: 200 }
+        mcp_permissions: { type: array, items: { type: string, maxLength: 256 }, maxItems: 200 }
+        sandbox_policy: { type: object, additionalProperties: true }
+        network_policy: { type: object, additionalProperties: true }
+        execution_profile: { type: string, maxLength: 200 }
+    AgentRun:
+      type: object
+      required: [id, organization_id, project_id, work_item_id, agent_provider, agent_name, status, approval_fingerprint_version, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        agent_provider: { type: string }
+        agent_name: { type: string }
+        model: { type: string }
+        base_sha: { type: string }
+        branch: { type: string }
+        execution_inputs: { $ref: "#/components/schemas/AgentRunExecutionInputs" }
+        execution_policy: { type: object, additionalProperties: true }
+        approval_fingerprint_version: { type: integer, minimum: 1 }
+        approval_fingerprint: { type: string, maxLength: 128 }
+        status:
+          { $ref: "#/components/schemas/AgentRunStatus" }
+        approved: { type: boolean }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        last_heartbeat_at: { type: string, format: date-time, nullable: true }
+        interruption_reason: { type: string }
+        commit_sha: { type: string }
+        pull_request_id: { type: string, format: uuid }
+        result: { type: object, additionalProperties: true }
+        error: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    AgentRunStatus:
+      type: string
+      enum: [INTERRUPTED, QUEUED, PREPARING, PLANNING, INVESTIGATING, IMPLEMENTING, TESTING, REVIEWING, COMPLETED, FAILED, CANCELLED]
+    AgentRunResultRequest:
+      type: object
+      properties:
+        commit_sha: { type: string, maxLength: 128 }
+        pull_request_id: { type: string, format: uuid }
+        result: { type: object, additionalProperties: true }
+        error: { type: string, maxLength: 4000, nullable: true }
+        metadata: { type: object, additionalProperties: true }
+    AgentRunTestCaseResult:
+      type: object
+      required: [position, status]
+      properties:
+        position: { type: integer, minimum: 1 }
+        status: { type: string, enum: [NOT_RUN, PASS, FAIL, BLOCKED] }
+        note: { type: string, maxLength: 4000 }
+        evidence_refs: { type: array, items: { type: string, maxLength: 512 }, maxItems: 30 }
+    AgentRunTestResultsRequest:
+      type: object
+      properties:
+        test_cases: { type: array, items: { $ref: "#/components/schemas/AgentRunTestCaseResult" }, maxItems: 200 }
+        review_note: { type: string, maxLength: 4000 }
+    AutonomousPolicy:
+      type: object
+      required: [enabled, providers, runtime, max_attempts, timeout_seconds, auto_retry, auto_create_pr, test_scope, mcp_permissions, execution_profile]
+      properties:
+        enabled: { type: boolean }
+        providers: { type: array, items: { type: string, enum: [codex, claude] }, maxItems: 10 }
+        runtime: { type: string, enum: [server, desktop, auto] }
+        max_attempts: { type: integer, minimum: 1, maximum: 10 }
+        timeout_seconds: { type: integer, minimum: 1, maximum: 86400 }
+        auto_retry: { type: boolean }
+        auto_create_pr: { type: boolean }
+        test_scope: { type: string, enum: [unresolved_only, full_regression] }
+        network_policy: { type: object, additionalProperties: true }
+        mcp_permissions: { type: array, items: { type: string, maxLength: 256 }, maxItems: 200 }
+        execution_profile: { type: string, maxLength: 200 }
+    AutonomousStartRequest:
+      type: object
+      required: [objective]
+      properties:
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        work_item_type: { type: string, enum: [TASK, BUG, STORY] }
+        title: { type: string, maxLength: 200 }
+        repository_id: { type: string, format: uuid }
+        base_sha: { type: string, maxLength: 128 }
+        branch: { type: string, maxLength: 255 }
+        objective: { type: string, minLength: 1, maxLength: 131072 }
+        agent_provider: { type: string, enum: [codex, claude] }
+        agent_name: { type: string, maxLength: 120 }
+        model: { type: string, maxLength: 120 }
+        target_environment: { type: string, maxLength: 120 }
+        test_case_positions: { type: array, items: { type: integer, minimum: 1 }, maxItems: 200 }
+        policy: { $ref: "#/components/schemas/AutonomousPolicy" }
+    AutonomousRun:
+      type: object
+      required: [id, organization_id, project_id, work_item_id, objective, agent_provider, agent_name, policy, status, phase, attempt, max_attempts, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        base_sha: { type: string }
+        branch: { type: string }
+        objective: { type: string }
+        agent_provider: { type: string }
+        agent_name: { type: string }
+        model: { type: string }
+        target_environment: { type: string }
+        policy: { $ref: "#/components/schemas/AutonomousPolicy" }
+        status:
+          type: string
+          enum: [QUEUED, INTAKE, WAITING_SPEC_REVIEW, READY_FOR_EXECUTION, EXECUTING, WAITING_PR_REVIEW, WAITING_TEST_FEEDBACK, FIXING, WAITING_DEPLOY_APPROVAL, DEPLOYING, COMPLETED, PAUSED, FAILED, CANCELLED]
+        phase: { type: string, enum: [INTAKE, SPECIFICATION, IMPLEMENTATION, TESTING, PULL_REQUEST, DEPLOYMENT] }
+        gate: { type: string, enum: ["", SPECIFICATION_REVIEW, RUNNER_AVAILABLE, PULL_REQUEST_REVIEW, TEST_FEEDBACK, DEPLOYMENT_APPROVAL, HUMAN_VERIFICATION, CLARIFICATION] }
+        attempt: { type: integer, minimum: 0 }
+        max_attempts: { type: integer, minimum: 1 }
+        current_agent_run_id: { type: string, format: uuid }
+        pull_request_id: { type: string, format: uuid }
+        commit_sha: { type: string }
+        unresolved_positions: { type: array, items: { type: integer, minimum: 1 } }
+        last_error: { type: string }
+        version: { type: integer, format: int64, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+    AutonomousFeedbackRequest:
+      type: object
+      required: [note]
+      properties:
+        source: { type: string, enum: [human, agent, ci, system] }
+        note: { type: string, minLength: 1, maxLength: 4000 }
+        severity: { type: string, maxLength: 32 }
+        commit_sha: { type: string, maxLength: 128 }
+        test_case_positions: { type: array, items: { type: integer, minimum: 1 }, maxItems: 200 }
+        evidence_refs: { type: array, items: { type: string, maxLength: 512 }, maxItems: 30 }
+    AutonomousFeedback:
+      allOf:
+        - $ref: "#/components/schemas/AutonomousFeedbackRequest"
+        - type: object
+          required: [id, run_id, created_by, created_at]
+          properties:
+            id: { type: string, format: uuid }
+            run_id: { type: string, format: uuid }
+            created_by: { type: string }
+            created_at: { type: string, format: date-time }
+    AutonomousRetryRequest:
+      type: object
+      properties:
+        feedback: { type: string, maxLength: 4000 }
+        test_case_positions: { type: array, items: { type: integer, minimum: 1 }, maxItems: 200 }
+    Environment:
+      type: object
+      required: [id, organization_id, project_id, key, name, kind, auto_deploy, require_approval, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        key: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [preview, development, staging, production] }
+        repository_id: { type: string, format: uuid }
+        workflow_ref: { type: string }
+        dispatch_url: { type: string, format: uri }
+        health_check_url: { type: string, format: uri }
+        auto_deploy: { type: boolean }
+        require_approval: { type: boolean }
+        secret_refs: { type: array, items: { type: string, maxLength: 256 }, maxItems: 30 }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateEnvironmentRequest:
+      type: object
+      required: [key, name, kind]
+      properties:
+        key: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,63}$" }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        kind: { type: string, enum: [preview, development, staging, production] }
+        repository_id: { type: string, format: uuid }
+        workflow_ref: { type: string, maxLength: 255 }
+        dispatch_url: { type: string, format: uri }
+        health_check_url: { type: string, format: uri }
+        auto_deploy: { type: boolean }
+        require_approval: { type: boolean }
+        secret_refs: { type: array, items: { type: string, maxLength: 256 }, maxItems: 30 }
+        metadata: { type: object, additionalProperties: true }
+    DeploymentRequest:
+      type: object
+      required: [id, organization_id, project_id, environment_id, commit_sha, status, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        environment_id: { type: string, format: uuid }
+        autonomous_run_id: { type: string, format: uuid }
+        commit_sha: { type: string }
+        status: { type: string, enum: [PENDING_APPROVAL, DISPATCHED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        external_id: { type: string }
+        url: { type: string, format: uri }
+        approved_by: { type: string }
+        approved_at: { type: string, format: date-time, nullable: true }
+        last_error: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateDeploymentRequest:
+      type: object
+      required: [project_id, environment_id, commit_sha]
+      properties:
+        project_id: { type: string, format: uuid }
+        environment_id: { type: string, format: uuid }
+        autonomous_run_id: { type: string, format: uuid }
+        commit_sha: { type: string, minLength: 1, maxLength: 128 }
+    DeploymentStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [DISPATCHED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        external_id: { type: string, maxLength: 255 }
+        url: { type: string, format: uri }
+        last_error: { type: string, maxLength: 4000 }
+    AgentRunStep:
+      type: object
+      required: [sequence, phase, status]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        sequence: { type: integer, minimum: 1 }
+        phase: { type: string, maxLength: 100 }
+        status: { type: string, maxLength: 50 }
+        summary: { type: string, maxLength: 20000 }
+        files_read: { type: integer, minimum: 0 }
+        files_modified: { type: integer, minimum: 0 }
+        commands: { type: array, items: { type: string, maxLength: 2000 }, maxItems: 100 }
+        tests: { type: array, items: { type: string, maxLength: 2000 }, maxItems: 100 }
+        metadata: { type: object, additionalProperties: true }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+    AgentRunArtifact:
+      type: object
+      required: [artifact_type, name, size_bytes]
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        artifact_type: { type: string, maxLength: 100 }
+        name: { type: string, maxLength: 255 }
+        content_hash: { type: string, maxLength: 128 }
+        size_bytes: { type: integer, minimum: 0, maximum: 52428800 }
+        object_key: { type: string, maxLength: 1024 }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    Notification:
+      type: object
+      required: [id, notification_type, title, body, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid, nullable: true }
+        notification_type: { type: string }
+        title: { type: string }
+        body: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string }
+        read_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    CreateAutomationRuleRequest:
+      type: object
+      required: [name, event_type]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        event_type: { type: string }
+        action_type: { type: string, enum: [notify], default: notify }
+        config:
+          type: object
+          additionalProperties: { type: string }
+    AutomationRule:
+      type: object
+      required: [id, project_id, name, event_type, action_type, enabled, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        name: { type: string }
+        event_type: { type: string }
+        action_type: { type: string }
+        config: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
