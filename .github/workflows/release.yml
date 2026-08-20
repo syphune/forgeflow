@@ -107,7 +107,7 @@ jobs:
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           WIN_CSC_LINK: ${{ secrets.WINDOWS_CERTIFICATE_P12 }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: forgeflow-desktop-${{ matrix.os }}
           path: apps/desktop/out/make/**
