@@ -1,6 +1,9 @@
 package specification
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Provenance string
 
@@ -21,6 +24,14 @@ const (
 	VerifiedByHuman VerificationStatus = "HUMAN_VERIFIED"
 )
 
+type GateClass string
+
+const (
+	GateRequired      GateClass = "REQUIRED"
+	GateOptional      GateClass = "OPTIONAL"
+	GateInformational GateClass = "INFORMATIONAL"
+)
+
 type FieldKey string
 
 const (
@@ -36,6 +47,7 @@ const (
 	BusinessImpact   FieldKey = "BUSINESS_IMPACT"
 	Goal             FieldKey = "GOAL"
 	NoCodeChange     FieldKey = "NO_CODE_CHANGE_RATIONALE"
+	RollbackPlan     FieldKey = "ROLLBACK_PLAN"
 )
 
 type Field struct {
@@ -73,10 +85,28 @@ type RegressionTestCase struct {
 	Position           int                `json:"position"`
 	Scenario           string             `json:"scenario"`
 	ExpectedResult     string             `json:"expected_result"`
+	GateClass          GateClass          `json:"gate_class"`
 	VerificationStatus VerificationStatus `json:"verification_status"`
 	Provenance         Provenance         `json:"provenance"`
 	VerifiedBy         string             `json:"verified_by,omitempty"`
 	VerifiedAt         *time.Time         `json:"verified_at,omitempty"`
+}
+
+func normalizeGateClass(value GateClass) GateClass {
+	value = GateClass(strings.ToUpper(strings.TrimSpace(string(value))))
+	if value == "" {
+		return GateRequired
+	}
+	return value
+}
+
+func validGateClass(value GateClass) bool {
+	switch normalizeGateClass(value) {
+	case GateRequired, GateOptional, GateInformational:
+		return true
+	default:
+		return false
+	}
 }
 
 type ContextRef struct {

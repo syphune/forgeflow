@@ -53,6 +53,12 @@ paths:
             description: Include archived work items in the result,
           }
         - {
+            name: exclude_terminal,
+            in: query,
+            schema: { type: boolean, default: false },
+            description: Exclude work items in terminal workflow statuses unless a status filter is provided,
+          }
+        - {
             name: sort,
             in: query,
             schema: { type: string, enum: [updated, backlog], default: updated },
@@ -260,6 +266,94 @@ paths:
           $ref: "#/components/responses/ConflictError"
         "422":
           $ref: "#/components/responses/ValidationError"
+  /work-items/{id}/branch-plan:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    get:
+      operationId: getWorkItemBranchPlan
+      responses:
+        "200":
+          description: Immutable branch plan snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchPlan" }
+        "404": { $ref: "#/components/responses/NotFoundError" }
+  /work-items/{id}/branch-plan/preview:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    post:
+      operationId: previewWorkItemBranchPlan
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchPlanPreviewRequest" }
+      responses:
+        "200":
+          description: Branch plan preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchPlanPreview" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /work-items/{id}/branch-plan/prepare:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    post:
+      operationId: prepareWorkItemBranchPlan
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchPlanPreviewRequest" }
+      responses:
+        "200":
+          description: Prepared branch plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchPlan" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /work-items/{id}/branch-plan/pull-request:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    post:
+      operationId: createWorkItemBranchPullRequest
+      responses:
+        "200":
+          description: Idempotent pull request operation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchOperation" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+  /work-items/{id}/branch-plan/sync:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    post:
+      operationId: syncWorkItemBranchPlan
+      responses:
+        "200":
+          description: Sync pull request operations
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchOperationList" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+  /work-items/{id}/branch-plan/operations:
+    parameters:
+      - $ref: "#/components/parameters/WorkItemID"
+      - $ref: "#/components/parameters/ProjectIDHeader"
+    get:
+      operationId: listWorkItemBranchOperations
+      responses:
+        "200":
+          description: Branch operations for the immutable plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchOperationList" }
   /work-items/{id}/assignments:
     parameters:
       - $ref: "#/components/parameters/WorkItemID"
@@ -752,6 +846,19 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/Organization" }
+    post:
+      operationId: createOrganization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrganizationRequest" }
+      responses:
+        "201":
+          description: Organization created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
   /organizations/current:
     get:
       operationId: getCurrentOrganization
@@ -903,6 +1010,29 @@ paths:
           description: Effective project-scoped authorization
           content:
             application/json: { schema: { $ref: "#/components/schemas/AuthorizationContext" } }
+  /projects/{id}/board-settings:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getProjectBoardSettings
+      responses:
+        "200":
+          description: Jira-style board visibility settings
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ProjectBoardSettings" } }
+    put:
+      operationId: updateProjectBoardSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/ProjectBoardSettingsRequest" } }
+      responses:
+        "200":
+          description: Updated board visibility settings
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ProjectBoardSettings" } }
+        "422": { $ref: "#/components/responses/ValidationError" }
   /projects/{id}/members:
     parameters:
       - {
@@ -1004,6 +1134,32 @@ paths:
       operationId: removeProjectMemberRole
       responses:
         "204": { description: Project-specific role removed }
+  /projects/{id}/branch-policy:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+    get:
+      operationId: getProjectBranchPolicy
+      responses:
+        "200":
+          description: Project branch policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchPolicy" }
+    put:
+      operationId: saveProjectBranchPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BranchPolicyInput" }
+      responses:
+        "200":
+          description: Saved project branch policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BranchPolicy" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
   /workflows/current:
     get:
       operationId: getCurrentWorkflow
@@ -1035,6 +1191,21 @@ paths:
         "403": { $ref: "#/components/responses/ForbiddenError" }
         "409": { $ref: "#/components/responses/ConflictError" }
         "422": { $ref: "#/components/responses/ValidationError" }
+  /workflows/current/templates/release-gated:
+    post:
+      operationId: installReleaseGatedWorkflow
+      summary: Install the optional release-gated workflow for the selected project
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Release-gated workflow installed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkflowResponse" }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
   /workflows/current/statuses:
     get:
       operationId: listWorkflowStatuses
@@ -1060,6 +1231,8 @@ paths:
       responses:
         "200":
           description: Board columns projected from workflow statuses
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/BoardResponse" } }
   /sprints:
     get:
       operationId: listSprints
@@ -1513,6 +1686,31 @@ paths:
           description: Project autonomous policy updated
           content:
             application/json: { schema: { $ref: "#/components/schemas/AutonomousPolicy" } }
+  /projects/{id}/delivery-policy:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+    get:
+      operationId: getProjectDeliveryPolicy
+      responses:
+        "200":
+          description: Project delivery and release gates
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeliveryPolicy" } }
+    put:
+      operationId: updateProjectDeliveryPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryPolicy" }
+      responses:
+        "200":
+          description: Project delivery and release gates updated
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeliveryPolicy" } }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "409": { $ref: "#/components/responses/ConflictError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
   /projects/{id}/environments:
     parameters:
       - { $ref: "#/components/parameters/ProjectPathID" }
@@ -1579,6 +1777,19 @@ paths:
           description: Deployment approved
           content:
             application/json: { schema: { $ref: "#/components/schemas/DeploymentRequest" } }
+  /deployments/{id}/verify:
+    post:
+      operationId: verifyDeployment
+      parameters:
+        - { $ref: "#/components/parameters/DeploymentID" }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Production deployment verified
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/DeploymentRequest" } }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "409": { $ref: "#/components/responses/ConflictError" }
   /deployments/{id}/status:
     post:
       operationId: updateDeploymentStatus
@@ -1672,6 +1883,27 @@ paths:
           }
       responses:
         "302": { description: Redirect back to Forgeflow }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /integrations/github/user/start:
+    get:
+      operationId: startGitHubUserAuthorization
+      summary: Start the GitHub code authorization flow for the current user
+      parameters:
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "302": { description: Redirect to GitHub OAuth }
+        "503": { $ref: "#/components/responses/ValidationError" }
+  /integrations/github/user/callback:
+    get:
+      operationId: completeGitHubUserAuthorization
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, required: false, schema: { type: string } }
+        - { name: error, in: query, required: false, schema: { type: string } }
+      responses:
+        "302": { description: Redirect back to Forgeflow }
+        "401": { $ref: "#/components/responses/UnauthorizedError" }
         "422": { $ref: "#/components/responses/ValidationError" }
   /integrations/github/repositories:
     get:
@@ -1789,6 +2021,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/RepositoryContext" }
+  /projects/{id}/repositories/{repository_id}/initialize:
+    parameters:
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: repository_id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      operationId: initializeRepository
+      summary: Create the first main commit for an empty linked repository
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "201":
+          description: Repository initialized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositoryInitialization" }
   /projects/{id}/repositories/{repository_id}/pull-requests:
     parameters:
       - {
@@ -2312,6 +2569,7 @@ components:
         parent_id: { type: string, format: uuid }
         assignee_id: { type: string, format: uuid, nullable: true }
         priority: { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] }
+        risk_level: { type: string, enum: [LOW, NORMAL, HIGH, CRITICAL], default: NORMAL }
         due_at: { type: string, format: date-time, nullable: true }
         estimate_points:
           { type: integer, minimum: 0, maximum: 100, nullable: true }
@@ -2324,6 +2582,7 @@ components:
         parent_id: { type: string, format: uuid, nullable: true }
         repository_id: { type: string, format: uuid, nullable: true }
         priority: { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] }
+        risk_level: { type: string, enum: [LOW, NORMAL, HIGH, CRITICAL] }
         due_at: { type: string, format: date-time, nullable: true }
         estimate_points:
           { type: integer, minimum: 0, maximum: 100, nullable: true }
@@ -2391,7 +2650,7 @@ components:
         position: { type: integer, minimum: 1 }
     WorkItemResponse:
       type: object
-      required: [id, key, title, status, version]
+      required: [id, key, title, status, version, risk_level]
       properties:
         id: { type: string, format: uuid }
         key: { type: string }
@@ -2405,6 +2664,7 @@ components:
         type: { type: string }
         parent_id: { type: string, format: uuid, nullable: true }
         priority: { type: string, enum: [LOWEST, LOW, MEDIUM, HIGH, HIGHEST] }
+        risk_level: { type: string, enum: [LOW, NORMAL, HIGH, CRITICAL] }
         assignee_id: { type: string, format: uuid, nullable: true }
         reporter_id: { type: string, format: uuid, nullable: true }
         due_at: { type: string, format: date-time, nullable: true }
@@ -2414,6 +2674,7 @@ components:
         sprint_id: { type: string, format: uuid, nullable: true }
         archived_at: { type: string, format: date-time, nullable: true }
         archived_by: { type: string, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
     WorkflowStatus:
       type: object
       required: [key, display_name, category, position, is_terminal]
@@ -2435,7 +2696,7 @@ components:
           type: array
           items:
             type: string
-            enum: [require_specification_ready, require_human_verification, require_assignee, require_repository, require_pull_request, require_ci_success, require_permission]
+            enum: [require_specification_ready, require_human_verification, require_assignee, require_repository, require_pull_request, require_ci_success, require_permission, require_branch_plan, require_branch_sync, require_current_ci_checks, require_pull_request_review, require_qa_passing, require_release_approval, require_deployment_success, require_production_verification, require_rollback_plan]
         required_permissions:
           type: array
           maxItems: 20
@@ -2468,6 +2729,131 @@ components:
         transitions:
           type: array
           items: { $ref: "#/components/schemas/WorkflowTransition" }
+    BranchRule:
+      type: object
+      required: [branch_type, base_role, target_role, working_mode, create_pull_request, require_sync]
+      properties:
+        branch_type: { type: string, enum: [feature, fix, refactor, chore, hotfix, release] }
+        base_role: { type: string, enum: [development, production, release] }
+        target_role: { type: string, enum: [development, production, release] }
+        sync_roles:
+          type: array
+          maxItems: 20
+          items: { type: string, enum: [development, production, release] }
+        working_mode: { type: string, enum: [ephemeral, managed] }
+        allow_release_base: { type: boolean }
+        create_pull_request: { type: boolean }
+        require_sync: { type: boolean }
+    BranchPolicyInput:
+      type: object
+      required: [development_branch, production_branch, release_prefix, work_branch_template, rules]
+      properties:
+        development_branch: { type: string, minLength: 1, maxLength: 255 }
+        production_branch: { type: string, minLength: 1, maxLength: 255 }
+        release_prefix: { type: string, minLength: 2, maxLength: 80, pattern: "^.+/$" }
+        work_branch_template: { type: string, minLength: 1, maxLength: 200, pattern: "^forgeflow/" }
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { $ref: "#/components/schemas/BranchRule" }
+        expected_version: { type: integer, minimum: 0 }
+    BranchPolicy:
+      allOf:
+        - $ref: "#/components/schemas/BranchPolicyInput"
+        - type: object
+          required: [id, organization_id, project_id, version]
+          properties:
+            id: { type: string, format: uuid }
+            organization_id: { type: string, format: uuid }
+            project_id: { type: string, format: uuid }
+            version: { type: integer, minimum: 0 }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    BranchPlanPreviewRequest:
+      type: object
+      properties:
+        branch_type: { type: string, enum: [feature, fix, refactor, chore, hotfix, release] }
+        release_branch: { type: string, maxLength: 255 }
+    BranchPlanPreview:
+      type: object
+      required: [organization_id, project_id, work_item_id, repository_id, branch_type, base_branch, target_branch, working_branch, create_pull_request, require_sync, base_sha, state]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        work_item_key: { type: string }
+        branch_type: { type: string }
+        release_branch: { type: string, nullable: true }
+        base_branch: { type: string }
+        target_branch: { type: string }
+        working_branch: { type: string }
+        sync_branches: { type: array, items: { type: string } }
+        create_pull_request: { type: boolean }
+        require_sync: { type: boolean }
+        base_sha: { type: string }
+        policy_version: { type: integer }
+        work_item_version: { type: integer }
+        state: { type: string, enum: [PENDING, READY, FAILED] }
+        error: { type: string }
+        created_by: { type: string }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BranchPlan:
+      type: object
+      required: [id, organization_id, project_id, work_item_id, repository_id, branch_type, base_branch, target_branch, working_branch, create_pull_request, require_sync, base_sha, state, version]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        work_item_key: { type: string }
+        branch_type: { type: string }
+        release_branch: { type: string, nullable: true }
+        base_branch: { type: string }
+        target_branch: { type: string }
+        working_branch: { type: string }
+        sync_branches: { type: array, items: { type: string } }
+        create_pull_request: { type: boolean }
+        require_sync: { type: boolean }
+        base_sha: { type: string }
+        policy_version: { type: integer }
+        work_item_version: { type: integer }
+        state: { type: string, enum: [PENDING, READY, FAILED] }
+        error: { type: string }
+        created_by: { type: string }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BranchOperation:
+      type: object
+      required: [id, plan_id, kind, state, idempotency_key, version]
+      properties:
+        id: { type: string, format: uuid }
+        plan_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        kind: { type: string, enum: [BRANCH_CREATE, PULL_REQUEST, SYNC_PULL_REQUEST] }
+        state: { type: string, enum: [PENDING, COMPLETED, MERGED, FAILED] }
+        idempotency_key: { type: string }
+        source_branch: { type: string }
+        target_branch: { type: string }
+        pull_request_number: { type: integer, format: int64 }
+        pull_request_url: { type: string, format: uri }
+        error: { type: string }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BranchOperationList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/BranchOperation" } }
     AuditRecord:
       type: object
       required: [id, actor_type, actor_id, action, resource_type, resource_id, created_at]
@@ -2537,6 +2923,15 @@ components:
             type: array,
             items: { $ref: "#/components/schemas/RepositoryCIRun" },
           }
+    RepositoryInitialization:
+      type: object
+      required: [repository_id, full_name, branch, path, commit_sha]
+      properties:
+        repository_id: { type: string, format: uuid }
+        full_name: { type: string }
+        branch: { type: string }
+        path: { type: string }
+        commit_sha: { type: string }
     RepositoryBranch:
       type: object
       properties:
@@ -2612,6 +3007,11 @@ components:
         head_ref: { type: string }
         body: { type: string }
         url: { type: string, format: uri }
+        author_login: { type: string }
+        changed_paths: { type: array, items: { type: string } }
+        approved_by_logins: { type: array, items: { type: string } }
+        changes_requested: { type: boolean }
+        merged: { type: boolean }
         updated_at: { type: string, format: date-time }
     CreateDraftPullRequestRequest:
       type: object
@@ -2627,6 +3027,7 @@ components:
         id: { type: string, format: uuid }
         repository_id: { type: string, format: uuid }
         external_id: { type: string }
+        check_name: { type: string }
         status: { type: string }
         conclusion: { type: string }
         sha: { type: string }
@@ -2812,6 +3213,12 @@ components:
         slug: { type: string }
         display_name: { type: string }
         created_at: { type: string, format: date-time }
+    CreateOrganizationRequest:
+      type: object
+      required: [slug, display_name]
+      properties:
+        slug: { type: string, minLength: 1, maxLength: 63 }
+        display_name: { type: string, minLength: 1, maxLength: 160 }
     Workspace:
       type: object
       required: [id, organization_id, key, display_name, created_at]
@@ -2830,7 +3237,36 @@ components:
         workspace_id: { type: string, format: uuid }
         key: { type: string }
         display_name: { type: string }
+        done_visibility_days: { type: integer, enum: [0, 7, 14, 30, 60], description: 0 keeps completed work visible indefinitely }
         created_at: { type: string, format: date-time }
+    ProjectBoardSettings:
+      type: object
+      required: [project_id, done_visibility_days]
+      properties:
+        project_id: { type: string, format: uuid }
+        done_visibility_days: { type: integer, enum: [0, 7, 14, 30, 60] }
+    ProjectBoardSettingsRequest:
+      type: object
+      required: [done_visibility_days]
+      properties:
+        done_visibility_days: { type: integer, enum: [0, 7, 14, 30, 60] }
+    BoardColumn:
+      type: object
+      required: [status, name, position, ordering_version, items]
+      properties:
+        status: { type: string }
+        name: { type: string }
+        position: { type: integer }
+        ordering_version: { type: integer, format: int64 }
+        items: { type: array, items: { $ref: "#/components/schemas/WorkItemResponse" } }
+    BoardResponse:
+      type: object
+      required: [project_id, columns, truncated, done_visibility_days]
+      properties:
+        project_id: { type: string, format: uuid }
+        columns: { type: array, items: { $ref: "#/components/schemas/BoardColumn" } }
+        truncated: { type: boolean }
+        done_visibility_days: { type: integer, enum: [0, 7, 14, 30, 60] }
     MemberRoleRequest:
       type: object
       required: [role_key]
@@ -2978,6 +3414,7 @@ components:
         position: { type: integer }
         scenario: { type: string }
         expected_result: { type: string }
+        gate_class: { type: string, enum: [REQUIRED, OPTIONAL, INFORMATIONAL], default: REQUIRED }
         provenance: { type: string }
         verification_status: { type: string }
         verified_by: { type: string, format: uuid }
@@ -3059,7 +3496,9 @@ components:
       properties:
         id: { type: string }
         type: { type: string }
-        organization_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid, nullable: true }
+        login: { type: string }
+        display_name: { type: string }
         source: { type: string }
     AuthorizationContext:
       type: object
@@ -3337,6 +3776,45 @@ components:
         require_approval: { type: boolean }
         secret_refs: { type: array, items: { type: string, maxLength: 256 }, maxItems: 30 }
         metadata: { type: object, additionalProperties: true }
+    PathReviewRule:
+      type: object
+      required: [pattern, min_approvals, required_roles]
+      properties:
+        pattern: { type: string, minLength: 1, maxLength: 512 }
+        min_approvals: { type: integer, minimum: 0, maximum: 20 }
+        required_roles: { type: array, items: { type: string, maxLength: 64 }, maxItems: 20 }
+    ReviewPolicy:
+      type: object
+      required: [min_approvals, forbid_self_approval, required_roles, path_rules]
+      properties:
+        min_approvals: { type: integer, minimum: 0, maximum: 20 }
+        forbid_self_approval: { type: boolean, default: true }
+        required_roles: { type: array, items: { type: string, maxLength: 64 }, maxItems: 20 }
+        path_rules: { type: array, items: { $ref: "#/components/schemas/PathReviewRule" }, maxItems: 50 }
+    RiskRule:
+      type: object
+      required: [min_approvals, required_roles, require_qa, require_rollback_plan, require_production_verification]
+      properties:
+        min_approvals: { type: integer, minimum: 0, maximum: 20 }
+        required_roles: { type: array, items: { type: string, maxLength: 64 }, maxItems: 20 }
+        require_qa: { type: boolean }
+        require_rollback_plan: { type: boolean }
+        require_production_verification: { type: boolean }
+    DeliveryPolicy:
+      type: object
+      required: [version, release_mode, review, risk_rules]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 1 }
+        release_mode: { type: string, enum: [standard, release_gated] }
+        production_environment_id: { type: string, format: uuid }
+        required_checks: { type: array, items: { type: string, maxLength: 255 }, maxItems: 50 }
+        review: { $ref: "#/components/schemas/ReviewPolicy" }
+        risk_rules:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/RiskRule" }
     DeploymentRequest:
       type: object
       required: [id, organization_id, project_id, environment_id, commit_sha, status, version, created_at, updated_at]
@@ -3345,9 +3823,10 @@ components:
         organization_id: { type: string, format: uuid }
         project_id: { type: string, format: uuid }
         environment_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
         autonomous_run_id: { type: string, format: uuid }
         commit_sha: { type: string }
-        status: { type: string, enum: [PENDING_APPROVAL, DISPATCHED, RUNNING, SUCCEEDED, FAILED, CANCELLED] }
+        status: { type: string, enum: [PENDING_APPROVAL, DISPATCHED, RUNNING, SUCCEEDED, FAILED, CANCELLED, VERIFIED] }
         external_id: { type: string }
         url: { type: string, format: uri }
         approved_by: { type: string }
@@ -3362,6 +3841,7 @@ components:
       properties:
         project_id: { type: string, format: uuid }
         environment_id: { type: string, format: uuid }
+        work_item_id: { type: string, format: uuid }
         autonomous_run_id: { type: string, format: uuid }
         commit_sha: { type: string, minLength: 1, maxLength: 128 }
     DeploymentStatusRequest:

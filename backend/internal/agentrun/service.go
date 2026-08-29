@@ -256,7 +256,10 @@ func (s *Service) Resume(ctx context.Context, actor identity.Actor, projectID, i
 	if run.Status != Interrupted {
 		return Run{}, apperr.New(apperr.CodeConflict, 409, "only interrupted AgentRuns can be resumed", map[string]any{"status": run.Status})
 	}
-	specificationVersion, err := s.validateReadyWorkItem(ctx, actor, run.ProjectID, run.WorkItemID, run.RepositoryID, len(run.ExecutionInputs.TestCasePositions) > 0)
+	// An interrupted, already-approved run may resume the same implementation
+	// after the work item has moved to IN_PROGRESS. Follow-up runs still require
+	// explicit test-case positions at creation time.
+	specificationVersion, err := s.validateReadyWorkItem(ctx, actor, run.ProjectID, run.WorkItemID, run.RepositoryID, true)
 	if err != nil {
 		return Run{}, err
 	}
@@ -434,8 +437,8 @@ func (s *Service) RecordTestResults(ctx context.Context, actor identity.Actor, p
 		if err != nil {
 			return err
 		}
-		if before.Status == Cancelled {
-			return apperr.New(apperr.CodeConflict, 409, "cancelled AgentRuns cannot receive test results", nil)
+		if before.Status != Testing && before.Status != Reviewing && before.Status != Completed {
+			return apperr.New(apperr.CodeConflict, 409, "test results can only be recorded while an AgentRun is testing, reviewing, or completed", map[string]any{"status": before.Status})
 		}
 		merged, err := mergeTestResults(before, input, actor.ID, s.now().UTC())
 		if err != nil {
@@ -451,6 +454,69 @@ func (s *Service) RecordTestResults(ctx context.Context, actor identity.Actor, p
 		return s.emit(txCtx, actor.OrganizationID, id, "agent_run.test_results_recorded", map[string]any{"project_id": projectID, "case_count": len(merged.Cases)})
 	})
 	return result, err
+}
+
+// HasPassingQA is the transition-service evidence adapter. It only accepts a
+// completed run whose selected test cases are all PASS and, when supplied, are
+// attached to the current pull-request head.
+func (s *Service) HasPassingQA(ctx context.Context, organizationID, projectID, workItemID, commitSHA string) (bool, error) {
+	runs, err := s.store.List(ctx, organizationID, projectID, workItemID)
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if run.Status != Completed || strings.TrimSpace(commitSHA) == "" || run.CommitSHA != commitSHA {
+			continue
+		}
+		positions := append([]int(nil), run.ExecutionInputs.TestCasePositions...)
+		if s.workItems != nil {
+			positions, err = s.workItems.RequiredRegressionTestPositions(ctx, organizationID, projectID, workItemID)
+			if err != nil {
+				return false, err
+			}
+		}
+		if len(positions) == 0 || !containsAllPositions(run.ExecutionInputs.TestCasePositions, positions) {
+			continue
+		}
+		var stored struct {
+			Cases []TestCaseResult `json:"test_cases"`
+		}
+		raw, err := json.Marshal(run.Result)
+		if err != nil {
+			return false, err
+		}
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			return false, err
+		}
+		byPosition := make(map[int]TestCaseStatus, len(stored.Cases))
+		for _, item := range stored.Cases {
+			byPosition[item.Position] = item.Status
+		}
+		allPassed := true
+		for _, position := range positions {
+			if byPosition[position] != TestPassed {
+				allPassed = false
+				break
+			}
+		}
+		if allPassed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func containsAllPositions(selected, required []int) bool {
+	values := make(map[int]struct{}, len(selected))
+	for _, position := range selected {
+		values[position] = struct{}{}
+	}
+	for _, position := range required {
+		if _, ok := values[position]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func mergeTestResults(run Run, input TestResultsInput, actorID string, now time.Time) (TestResultSet, error) {

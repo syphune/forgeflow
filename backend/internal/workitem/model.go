@@ -12,6 +12,15 @@ const (
 	SubTask Type = "SUB_TASK"
 )
 
+type RiskLevel string
+
+const (
+	RiskLow      RiskLevel = "LOW"
+	RiskNormal   RiskLevel = "NORMAL"
+	RiskHigh     RiskLevel = "HIGH"
+	RiskCritical RiskLevel = "CRITICAL"
+)
+
 type Scope struct {
 	OrganizationID string
 	WorkspaceID    string
@@ -32,6 +41,7 @@ type WorkItem struct {
 	ParentID       string     `json:"parent_id,omitempty"`
 	Status         string     `json:"status"`
 	Priority       string     `json:"priority"`
+	RiskLevel      RiskLevel  `json:"risk_level"`
 	AssigneeID     string     `json:"assignee_id,omitempty"`
 	ReporterID     string     `json:"reporter_id,omitempty"`
 	DueAt          *time.Time `json:"due_at,omitempty"`
@@ -43,6 +53,7 @@ type WorkItem struct {
 	Version        int64      `json:"version"`
 	ArchivedAt     *time.Time `json:"archived_at,omitempty"`
 	ArchivedBy     string     `json:"archived_by,omitempty"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
@@ -56,6 +67,7 @@ type CreateInput struct {
 	AssigneeID     string
 	ReporterID     string
 	Priority       string
+	RiskLevel      RiskLevel
 	DueAt          *time.Time
 	EstimatePoints *int
 	SprintID       string
@@ -69,6 +81,8 @@ type UpdateInput struct {
 	RepositoryID      *string
 	RepositoryIDSet   bool
 	Priority          *string
+	RiskLevel         *RiskLevel
+	RiskLevelSet      bool
 	DueAt             *time.Time
 	DueAtSet          bool
 	EstimatePoints    *int
@@ -79,17 +93,20 @@ type UpdateInput struct {
 }
 
 type ListFilter struct {
-	Status          string
-	Type            string
-	Priority        string
-	AssigneeID      string
-	SprintID        string
-	RepositoryID    string
-	Query           string
-	Sort            string
-	Limit           int
-	Cursor          string
-	IncludeArchived bool
+	Status                         string
+	Type                           string
+	Priority                       string
+	AssigneeID                     string
+	SprintID                       string
+	RepositoryID                   string
+	Query                          string
+	Sort                           string
+	Limit                          int
+	Cursor                         string
+	IncludeArchived                bool
+	ExcludeTerminal                bool
+	ExcludedStatuses               []string
+	ExcludeTerminalCompletedBefore *time.Time
 }
 
 type TransitionInput struct {
@@ -106,6 +123,7 @@ type MoveInput struct {
 	ExpectedVersion                    int64
 	ExpectedSourceOrderingVersion      int64
 	ExpectedDestinationOrderingVersion int64
+	CompletedAt                        *time.Time
 }
 
 type MoveResult struct {

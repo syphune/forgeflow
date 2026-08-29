@@ -31,8 +31,10 @@ func (OSCommandRunner) Run(ctx context.Context, dir, name string, args []string,
 }
 
 type Executor struct {
-	Commands CommandRunner
-	Now      func() time.Time
+	Commands            CommandRunner
+	Now                 func() time.Time
+	UseDocker           bool
+	DockerWorkspaceRoot string
 }
 
 func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) (Result, error) {
@@ -65,11 +67,15 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 	}
 	output := &limitedBuffer{limit: maxOutputBytes}
 	environment := safeEnvironment(job.Environment, job.Provider)
-	err = e.Commands.Run(ctx, job.Workspace, name, args, output, output, environment)
-	result := Result{ExitCode: 0, Output: output.String()}
+	if e.UseDocker {
+		err = e.runInContainer(ctx, job, name, args, output, environment)
+	} else {
+		err = e.Commands.Run(ctx, job.Workspace, name, args, output, output, environment)
+	}
+	result := Result{ExitCode: 0, Output: redactSecrets(output.String(), environment)}
 	if err != nil {
 		result.ExitCode = exitCode(err)
-		result.Error = boundedError(err)
+		result.Error = redactSecrets(boundedError(err), environment)
 		if ctx.Err() != nil {
 			result.Error = "runner timed out or was cancelled"
 		}
@@ -78,12 +84,38 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 		}
 		return result, err
 	}
+	if job.PushBranch {
+		if err := e.finalizeAndPush(ctx, job); err != nil {
+			result.ExitCode = 1
+			result.Error = redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + job.GitToken})
+			if emit != nil {
+				_ = emit(Event{JobID: job.ID, Type: EventFailed, Text: result.Output, ExitCode: result.ExitCode, Error: result.Error})
+			}
+			return result, err
+		}
+	}
 	if emit != nil {
 		if err := emit(Event{JobID: job.ID, Type: EventCompleted, Text: result.Output, ExitCode: result.ExitCode}); err != nil {
 			return Result{}, err
 		}
 	}
 	return result, nil
+}
+
+func (e Executor) finalizeAndPush(ctx context.Context, job Job) error {
+	status, err := e.runGitOutputWithToken(ctx, "inspect working tree", job.Workspace, []string{"-C", job.Workspace, "status", "--porcelain", "--untracked-files=all"}, job.GitToken)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		if err := e.runGitWithToken(ctx, "stage agent changes", job.Workspace, []string{"-C", job.Workspace, "add", "--all"}, job.GitToken); err != nil {
+			return err
+		}
+		if err := e.runGitWithToken(ctx, "commit agent changes", job.Workspace, []string{"-C", job.Workspace, "commit", "-m", strings.TrimSpace(job.CommitMessage)}, job.GitToken); err != nil {
+			return err
+		}
+	}
+	return e.runGitWithToken(ctx, "push agent branch", job.Workspace, []string{"-C", job.Workspace, "push", "--set-upstream", "origin", strings.TrimSpace(job.Branch)}, job.GitToken)
 }
 
 func (e Executor) prepareWorkspace(ctx context.Context, job Job) error {
@@ -97,7 +129,7 @@ func (e Executor) prepareWorkspace(ctx context.Context, job Job) error {
 	}
 	cloneArgs := []string{"clone", "--no-checkout", "--depth", "1"}
 	cloneArgs = append(cloneArgs, strings.TrimSpace(job.RepositoryURL), job.Workspace)
-	if err := e.runGit(ctx, "clone repository", "", cloneArgs); err != nil {
+	if err := e.runGitWithToken(ctx, "clone repository", "", cloneArgs, job.GitToken); err != nil {
 		return err
 	}
 	base := strings.TrimSpace(job.BaseSHA)
@@ -105,7 +137,7 @@ func (e Executor) prepareWorkspace(ctx context.Context, job Job) error {
 		base = "HEAD"
 	}
 	if base != "HEAD" {
-		if err := e.runGit(ctx, "fetch base commit", job.Workspace, []string{"-C", job.Workspace, "fetch", "--depth", "1", "origin", base}); err != nil {
+		if err := e.runGitWithToken(ctx, "fetch base commit", job.Workspace, []string{"-C", job.Workspace, "fetch", "--depth", "1", "origin", base}, job.GitToken); err != nil {
 			return err
 		}
 	}
@@ -116,18 +148,37 @@ func (e Executor) prepareWorkspace(ctx context.Context, job Job) error {
 		checkoutArgs = append(checkoutArgs, "--detach")
 	}
 	checkoutArgs = append(checkoutArgs, base)
-	return e.runGit(ctx, "checkout repository", job.Workspace, checkoutArgs)
+	return e.runGitWithToken(ctx, "checkout repository", job.Workspace, checkoutArgs, job.GitToken)
 }
 
 func (e Executor) runGit(ctx context.Context, action, dir string, args []string) error {
+	return e.runGitWithToken(ctx, action, dir, args, "")
+}
+
+func (e Executor) runGitWithToken(ctx context.Context, action, dir string, args []string, token string) error {
 	output := &limitedBuffer{limit: maxOutputBytes}
-	if err := e.Commands.Run(ctx, dir, "git", args, output, output, gitEnvironment()); err != nil {
+	if err := e.Commands.Run(ctx, dir, "git", args, output, output, gitEnvironment(token)); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s: runner timed out or was cancelled", action)
 		}
-		return fmt.Errorf("%s: %s", action, boundedError(err))
+		return fmt.Errorf("%s: %s", action, redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + token}))
 	}
 	return nil
+}
+
+func (e Executor) runGitOutput(ctx context.Context, action, dir string, args []string) (string, error) {
+	return e.runGitOutputWithToken(ctx, action, dir, args, "")
+}
+
+func (e Executor) runGitOutputWithToken(ctx context.Context, action, dir string, args []string, token string) (string, error) {
+	output := &limitedBuffer{limit: maxOutputBytes}
+	if err := e.Commands.Run(ctx, dir, "git", args, output, output, gitEnvironment(token)); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%s: runner timed out or was cancelled", action)
+		}
+		return "", fmt.Errorf("%s: %s", action, redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + token}))
+	}
+	return output.String(), nil
 }
 
 func providerCommand(job Job) (string, []string, error) {
@@ -174,7 +225,8 @@ func safeEnvironment(extra map[string]string, provider string) []string {
 		if name == "" || strings.ContainsAny(name, "=\x00\n\r") || strings.ContainsAny(value, "\x00\n\r") {
 			continue
 		}
-		if strings.Contains(strings.ToUpper(name), "TOKEN") || strings.Contains(strings.ToUpper(name), "SECRET") || strings.Contains(strings.ToUpper(name), "PASSWORD") {
+		upperName := strings.ToUpper(name)
+		if strings.Contains(upperName, "KEY") || strings.Contains(upperName, "TOKEN") || strings.Contains(upperName, "SECRET") || strings.Contains(upperName, "PASSWORD") {
 			continue
 		}
 		result = append(result, name+"="+value)
@@ -182,10 +234,41 @@ func safeEnvironment(extra map[string]string, provider string) []string {
 	return result
 }
 
-func gitEnvironment() []string {
+func (e Executor) runInContainer(ctx context.Context, job Job, name string, args []string, output io.Writer, environment []string) error {
+	containerJob := job
+	if root := strings.TrimSpace(e.DockerWorkspaceRoot); root != "" {
+		relative, err := filepath.Rel(filepath.Clean(job.WorkspaceRoot), filepath.Clean(job.Workspace))
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("workspace cannot be mapped into the Docker runner")
+		}
+		containerJob.Workspace = filepath.Join(filepath.Clean(root), relative)
+		containerJob.WorkspaceRoot = filepath.Clean(root)
+	}
+	containerArgs, err := containerArguments(containerJob)
+	if err != nil {
+		return err
+	}
+	imageIndex := len(containerArgs) - 1
+	argsWithEnvironment := append([]string(nil), containerArgs[:imageIndex]...)
+	for _, entry := range environment {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && key != "" {
+			argsWithEnvironment = append(argsWithEnvironment, "--env", key)
+		}
+	}
+	argsWithEnvironment = append(argsWithEnvironment, "--entrypoint", name, containerArgs[imageIndex])
+	argsWithEnvironment = append(argsWithEnvironment, args...)
+	return e.Commands.Run(ctx, "", "docker", argsWithEnvironment, output, output, environment)
+}
+
+func gitEnvironment(explicitToken string) []string {
 	result := safeEnvironment(nil, "")
 	result = append(result, "GIT_TERMINAL_PROMPT=0")
-	if token := strings.TrimSpace(os.Getenv("FORGEFLOW_GIT_TOKEN")); token != "" && !strings.ContainsAny(token, "\x00\n\r") {
+	token := strings.TrimSpace(explicitToken)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("FORGEFLOW_GIT_TOKEN"))
+	}
+	if token != "" && !strings.ContainsAny(token, "\x00\n\r") {
 		result = append(result, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=Authorization: Bearer "+token)
 	}
 	return result
@@ -233,13 +316,13 @@ func containerArguments(job Job) ([]string, error) {
 	}
 	image := strings.TrimSpace(job.Image)
 	if image == "" {
-		image = "forgeflow/agent-runner:latest"
+		image = "forgeflow/agent-runner:1.0.0"
 	}
 	network := strings.TrimSpace(job.NetworkMode)
 	if network == "" {
 		network = "none"
 	}
-	args := []string{"run", "--rm", "--read-only", "--network", network, "--workdir", "/workspace", "--volume", job.Workspace + ":/workspace:rw"}
+	args := []string{"run", "--rm", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", "--network", network, "--workdir", "/workspace", "--volume", job.Workspace + ":/workspace:rw", "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m"}
 	if job.CPULimit != "" {
 		args = append(args, "--cpus", job.CPULimit)
 	}
@@ -251,4 +334,19 @@ func containerArguments(job Job) ([]string, error) {
 	}
 	args = append(args, image)
 	return args, nil
+}
+
+func redactSecrets(value string, environment []string) string {
+	for _, entry := range environment {
+		name, secret, ok := strings.Cut(entry, "=")
+		if !ok || secret == "" {
+			continue
+		}
+		upper := strings.ToUpper(name)
+		if !strings.Contains(upper, "KEY") && !strings.Contains(upper, "TOKEN") && !strings.Contains(upper, "SECRET") && !strings.Contains(upper, "PASSWORD") {
+			continue
+		}
+		value = strings.ReplaceAll(value, secret, "[REDACTED]")
+	}
+	return value
 }

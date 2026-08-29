@@ -36,6 +36,21 @@ func TestWithAuthenticatorAllowsBootstrapSelectionForMe(t *testing.T) {
 	}
 }
 
+func TestWithAuthenticatorAllowsOrganizationCreationWithoutSelection(t *testing.T) {
+	authenticator := &captureAuthenticator{}
+	handler := WithAuthenticator(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), authenticator)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/organizations", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if !authenticator.request.AllowOrganizationSelection {
+		t.Fatal("organization creation must allow an unselected session")
+	}
+}
+
 func TestProjectIDFromRequest(t *testing.T) {
 	tests := []struct {
 		name   string

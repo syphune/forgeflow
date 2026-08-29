@@ -36,12 +36,31 @@ type MediaReferenceValidator interface {
 	ValidateReferences(context.Context, string, string, string, []string) error
 }
 
+type SpecificationPhase string
+
+const (
+	SpecificationPhaseRaw      SpecificationPhase = "RAW"
+	SpecificationPhaseRefining SpecificationPhase = "REFINING"
+	SpecificationPhaseReview   SpecificationPhase = "REVIEW"
+	SpecificationPhaseLocked   SpecificationPhase = "LOCKED"
+)
+
+type WorkItemState struct {
+	Status             string
+	SpecificationPhase SpecificationPhase
+}
+
+type WorkItemStateReader interface {
+	WorkItemState(context.Context, string, string, string) (WorkItemState, error)
+}
+
 type Service struct {
 	store          Store
 	now            func() time.Time
 	recorder       MutationRecorder
 	transaction    TransactionRunner
 	mediaValidator MediaReferenceValidator
+	stateReader    WorkItemStateReader
 	mu             sync.Mutex // ponytail: one process-wide spec mutation lock; use row-level targeted updates for multi-replica throughput.
 }
 
@@ -58,6 +77,7 @@ type Options struct {
 	Recorder                MutationRecorder
 	Transaction             TransactionRunner
 	MediaReferenceValidator MediaReferenceValidator
+	WorkItemStateReader     WorkItemStateReader
 }
 
 type directTransactionRunner struct{}
@@ -86,11 +106,42 @@ func NewService(store Store, now func() time.Time, options ...Options) *Service 
 	if configured.Transaction == nil {
 		configured.Transaction = directTransactionRunner{}
 	}
-	return &Service{store: store, now: now, recorder: configured.Recorder, transaction: configured.Transaction, mediaValidator: configured.MediaReferenceValidator}
+	return &Service{store: store, now: now, recorder: configured.Recorder, transaction: configured.Transaction, mediaValidator: configured.MediaReferenceValidator, stateReader: configured.WorkItemStateReader}
 }
 
 func (s *Service) SetMediaReferenceValidator(validator MediaReferenceValidator) {
 	s.mediaValidator = validator
+}
+
+func (s *Service) SetWorkItemStateReader(reader WorkItemStateReader) {
+	s.stateReader = reader
+}
+
+func (s *Service) requireContentState(ctx context.Context, organizationID, projectID, workItemID string) error {
+	return s.requirePhase(ctx, organizationID, projectID, workItemID, SpecificationPhaseRefining, SpecificationPhaseReview)
+}
+
+func (s *Service) requireVerificationState(ctx context.Context, organizationID, projectID, workItemID string) error {
+	return s.requirePhase(ctx, organizationID, projectID, workItemID, SpecificationPhaseRefining, SpecificationPhaseReview)
+}
+
+func (s *Service) requirePhase(ctx context.Context, organizationID, projectID, workItemID string, allowed ...SpecificationPhase) error {
+	if s.stateReader == nil {
+		return nil
+	}
+	state, err := s.stateReader.WorkItemState(ctx, organizationID, projectID, workItemID)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range allowed {
+		if state.SpecificationPhase == candidate {
+			return nil
+		}
+	}
+	return apperr.New(apperr.CodeConflict, 409, "specification action is not allowed in the current work item state", map[string]any{
+		"status":         state.Status,
+		"allowed_phases": allowed,
+	})
 }
 
 func (s *Service) Ensure(ctx context.Context, organizationID, projectID, workItemID string) (*Specification, error) {
@@ -119,6 +170,9 @@ func (s *Service) Analyses(ctx context.Context, organizationID, projectID, workI
 func (s *Service) AddAnalysis(ctx context.Context, organizationID, projectID, workItemID string, actor identity.Actor, input Analysis) (Analysis, error) {
 	if !actor.Has(identity.CapabilitySpecificationPropose) {
 		return Analysis{}, apperr.New(apperr.CodeForbidden, 403, "permission denied", map[string]any{"capability": identity.CapabilitySpecificationPropose})
+	}
+	if err := s.requireContentState(ctx, organizationID, projectID, workItemID); err != nil {
+		return Analysis{}, err
 	}
 	input.RootCauseHypothesis = strings.TrimSpace(input.RootCauseHypothesis)
 	input.BlastRadius = strings.TrimSpace(input.BlastRadius)
@@ -194,6 +248,9 @@ func (s *Service) Update(ctx context.Context, organizationID, projectID, workIte
 	}
 	var result *Specification
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireContentState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err
@@ -281,6 +338,10 @@ func (s *Service) Update(ctx context.Context, organizationID, projectID, workIte
 				testCase.Position = i + 1
 				testCase.Scenario = strings.TrimSpace(testCase.Scenario)
 				testCase.ExpectedResult = strings.TrimSpace(testCase.ExpectedResult)
+				testCase.GateClass = normalizeGateClass(testCase.GateClass)
+				if !validGateClass(testCase.GateClass) {
+					return apperr.New(apperr.CodeInvalidArgument, 422, "regression test gate_class is invalid", nil)
+				}
 				testCase.Provenance = HumanProvided
 				if i < len(before.RegressionCases) && before.RegressionCases[i].Scenario == testCase.Scenario && before.RegressionCases[i].ExpectedResult == testCase.ExpectedResult {
 					existing := before.RegressionCases[i]
@@ -350,6 +411,9 @@ func (s *Service) Review(ctx context.Context, organizationID, projectID, workIte
 	defer s.mu.Unlock()
 	var result *Specification
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requirePhase(txCtx, organizationID, projectID, workItemID, SpecificationPhaseReview); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err
@@ -628,6 +692,9 @@ func (s *Service) Propose(ctx context.Context, organizationID, projectID, workIt
 	}
 	proposal := Proposal{ID: id, WorkItemID: workItemID, Field: field, Value: value, Provenance: provenance, Status: "PENDING", CreatedAt: s.now().UTC()}
 	if err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireContentState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		if err := s.store.AddProposal(txCtx, organizationID, projectID, proposal); err != nil {
 			return err
 		}
@@ -646,6 +713,9 @@ func (s *Service) AcceptProposal(ctx context.Context, organizationID, projectID,
 	defer s.mu.Unlock()
 	var result Proposal
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireContentState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err
@@ -726,6 +796,9 @@ func (s *Service) VerifyField(ctx context.Context, organizationID, projectID, wo
 		return apperr.New(apperr.CodeAICannotVerify, 403, "AI actors cannot verify specification fields", map[string]any{"field": field})
 	}
 	return s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireVerificationState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err
@@ -760,6 +833,9 @@ func (s *Service) VerifyStep(ctx context.Context, organizationID, projectID, wor
 		return apperr.New(apperr.CodeAICannotVerify, 403, "AI actors cannot verify reproduction steps", map[string]any{"position": position})
 	}
 	return s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireVerificationState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err
@@ -793,6 +869,9 @@ func (s *Service) VerifyAcceptance(ctx context.Context, organizationID, projectI
 		return apperr.New(apperr.CodeAICannotVerify, 403, "AI actors cannot verify acceptance criteria", map[string]any{"position": position})
 	}
 	return s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireVerificationState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err
@@ -826,6 +905,9 @@ func (s *Service) VerifyRegression(ctx context.Context, organizationID, projectI
 		return apperr.New(apperr.CodeAICannotVerify, 403, "AI actors cannot verify regression test cases", map[string]any{"position": position})
 	}
 	return s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if err := s.requireVerificationState(txCtx, organizationID, projectID, workItemID); err != nil {
+			return err
+		}
 		spec, err := s.store.Get(txCtx, organizationID, projectID, workItemID)
 		if err != nil {
 			return err

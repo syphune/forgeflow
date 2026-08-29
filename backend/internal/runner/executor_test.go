@@ -13,24 +13,47 @@ type fakeCommandRunner struct {
 	calls []struct {
 		name string
 		args []string
+		env  []string
 	}
 }
 
-func (f *fakeCommandRunner) Run(_ context.Context, _ string, name string, args []string, stdout, _ io.Writer, _ []string) error {
+func (f *fakeCommandRunner) Run(_ context.Context, _ string, name string, args []string, stdout, _ io.Writer, env []string) error {
 	f.name = name
 	f.args = append([]string(nil), args...)
 	f.calls = append(f.calls, struct {
 		name string
 		args []string
-	}{name: name, args: append([]string(nil), args...)})
+		env  []string
+	}{name: name, args: append([]string(nil), args...), env: append([]string(nil), env...)})
 	_, _ = io.WriteString(stdout, "ok")
 	return nil
+}
+
+func TestExecutorKeepsRunnerGitTokenOutOfAgentEnvironment(t *testing.T) {
+	fake := &fakeCommandRunner{}
+	root := t.TempDir()
+	job := Job{ID: "job-1", AutonomousRunID: "workflow-1", AgentRunID: "run-1", Provider: "codex", Prompt: "fix it", RepositoryURL: "https://github.com/acme/app.git", BaseSHA: "HEAD", Branch: "forgeflow/fix-1", PushBranch: true, CommitMessage: "chore: update", WorkspaceRoot: root, Workspace: root + "/job-1", TimeoutSeconds: 5, AllowedHosts: []string{"github.com"}, GitToken: "runner-token"}
+	if _, err := (Executor{Commands: fake}).Execute(context.Background(), job, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for _, call := range fake.calls {
+		joined := strings.Join(call.env, "\n")
+		if call.name == "git" {
+			if !strings.Contains(joined, "GIT_CONFIG_VALUE_0=Authorization: Bearer runner-token") {
+				t.Fatalf("git command did not receive the short-lived credential: %q", joined)
+			}
+			continue
+		}
+		if strings.Contains(joined, "runner-token") {
+			t.Fatalf("agent command received the Git credential: %q", joined)
+		}
+	}
 }
 
 func TestExecutorUsesFixedProviderArgumentsAndBoundedEnvironment(t *testing.T) {
 	fake := &fakeCommandRunner{}
 	executor := Executor{Commands: fake}
-	job := Job{ID: "job-1", AutonomousRunID: "workflow-1", AgentRunID: "run-1", Provider: "codex", Prompt: "fix it", WorkspaceRoot: "/tmp/forgeflow", Workspace: "/tmp/forgeflow/job-1", TimeoutSeconds: 5, Environment: map[string]string{"API_TOKEN": "secret", "SAFE_FLAG": "1"}}
+	job := Job{ID: "job-1", AutonomousRunID: "workflow-1", AgentRunID: "run-1", Provider: "codex", Prompt: "fix it", WorkspaceRoot: "/tmp/forgeflow", Workspace: "/tmp/forgeflow/job-1", TimeoutSeconds: 5, Environment: map[string]string{"API_KEY": "key-secret", "API_TOKEN": "token-secret", "SAFE_FLAG": "1"}}
 	var events []Event
 	result, err := executor.Execute(context.Background(), job, func(event Event) error { events = append(events, event); return nil })
 	if err != nil {
@@ -42,10 +65,24 @@ func TestExecutorUsesFixedProviderArgumentsAndBoundedEnvironment(t *testing.T) {
 	if result.Output != "ok" || len(events) != 2 || events[0].Type != EventStarted || events[1].Type != EventCompleted {
 		t.Fatalf("execution result/events = %#v %#v", result, events)
 	}
-	environment := safeEnvironment(map[string]string{"API_TOKEN": "secret", "SAFE_FLAG": "1"}, "codex")
+	environment := safeEnvironment(map[string]string{"API_KEY": "key-secret", "API_TOKEN": "token-secret", "SAFE_FLAG": "1"}, "codex")
 	joined := strings.Join(environment, "\n")
 	if strings.Contains(joined, "secret") || !strings.Contains(joined, "SAFE_FLAG=1") {
 		t.Fatalf("unsafe environment leaked: %q", joined)
+	}
+}
+
+func TestContainerArgumentsKeepExecutionBounded(t *testing.T) {
+	job := Job{ID: "job-1", AutonomousRunID: "workflow-1", AgentRunID: "run-1", Provider: "codex", Prompt: "fix", WorkspaceRoot: "/tmp/forgeflow", Workspace: "/tmp/forgeflow/job-1", TimeoutSeconds: 30, Image: "forgeflow/agent-runner:1.0.0", CPULimit: "2", MemoryLimit: "2g", PidsLimit: 512}
+	args, err := containerArguments(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, required := range []string{"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 1000:1000", "--network none", "--tmpfs /tmp:rw,noexec,nosuid,size=256m", "--cpus 2", "--memory 2g", "--pids-limit 512"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("container args missing %q: %s", required, joined)
+		}
 	}
 }
 
@@ -81,6 +118,13 @@ func TestJobRejectsUnsafeRepositoryInputs(t *testing.T) {
 		"embedded credentials": {RepositoryURL: "https://token@github.com/acme/app.git"},
 		"untrusted host":       {RepositoryURL: "https://evil.example/acme/app.git"},
 		"unsafe branch":        {Branch: "--upload-pack=sh"},
+		"symbolic head branch": {Branch: "HEAD"},
+		"trailing slash":       {Branch: "feature/"},
+		"trailing dot":         {Branch: "feature."},
+		"double slash":         {Branch: "feature//one"},
+		"reflog selector":      {Branch: "feature@{1}"},
+		"dot component":        {Branch: "feature/."},
+		"lock component":       {Branch: "feature.lock"},
 		"unsafe sha":           {BaseSHA: "HEAD;id"},
 	} {
 		t.Run(name, func(t *testing.T) {

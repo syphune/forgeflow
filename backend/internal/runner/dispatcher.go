@@ -42,6 +42,9 @@ func (d HTTPDispatcher) Dispatch(ctx context.Context, job Job) (Result, error) {
 		return Result{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+d.Token)
+	if strings.TrimSpace(job.GitToken) != "" {
+		request.Header.Set("X-Forgeflow-Git-Token", job.GitToken)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {

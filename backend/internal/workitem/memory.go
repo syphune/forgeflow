@@ -62,7 +62,7 @@ func (r *MemoryRepository) Create(_ context.Context, scope Scope, input CreateIn
 		ID: id, OrganizationID: scope.OrganizationID, WorkspaceID: scope.WorkspaceID, ProjectID: scope.ProjectID,
 		Number: r.numbers[key], Key: projectKey(scope) + "-" + itoa(r.numbers[key]), Type: input.Type,
 		Title: strings.TrimSpace(input.Title), Description: input.Description, ParentID: strings.TrimSpace(input.ParentID), Status: workflow.Raw,
-		Priority: normalizedPriority(input.Priority), AssigneeID: strings.TrimSpace(input.AssigneeID), ReporterID: strings.TrimSpace(input.ReporterID), DueAt: input.DueAt, EstimatePoints: input.EstimatePoints,
+		Priority: normalizedPriority(input.Priority), RiskLevel: normalizedRiskLevel(input.RiskLevel), AssigneeID: strings.TrimSpace(input.AssigneeID), ReporterID: strings.TrimSpace(input.ReporterID), DueAt: input.DueAt, EstimatePoints: input.EstimatePoints,
 		BacklogRank: backlogRank, RepositoryID: strings.TrimSpace(input.RepositoryID), SprintID: strings.TrimSpace(input.SprintID), Version: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	r.items[id] = item
@@ -115,6 +115,16 @@ func (r *MemoryRepository) ListPage(_ context.Context, scope Scope, filter ListF
 			continue
 		}
 		if item.ArchivedAt != nil && !filter.IncludeArchived {
+			continue
+		}
+		excluded := false
+		for _, status := range filter.ExcludedStatuses {
+			if item.Status == status {
+				excluded = filter.ExcludeTerminal || filter.ExcludeTerminalCompletedBefore == nil || (item.CompletedAt != nil && item.CompletedAt.Before(*filter.ExcludeTerminalCompletedBefore))
+				break
+			}
+		}
+		if excluded {
 			continue
 		}
 		if cursor.Sort == "backlog" {
@@ -510,6 +520,9 @@ func (r *MemoryRepository) moveLocked(scope Scope, input MoveInput, targetStatus
 	now := r.now().UTC()
 	item.Status = targetStatus
 	item.BacklogRank = rank
+	if statusChanged {
+		item.CompletedAt = input.CompletedAt
+	}
 	item.Version++
 	item.UpdatedAt = now
 	if sourceKey == destinationKey {

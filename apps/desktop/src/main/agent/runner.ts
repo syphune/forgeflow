@@ -16,6 +16,7 @@ export type AgentRequest = {
   approved: boolean;
   repositoryID?: string;
   baseCommit?: string;
+  branch?: string;
   worktreeDiffHash?: string;
   specificationVersion?: number;
   timeoutMs?: number;

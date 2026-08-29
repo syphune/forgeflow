@@ -1,4 +1,4 @@
-.PHONY: dev dev-local docker-dev dev-host dev-db test test-backend test-integration test-mcp mcp-bridge test-desktop test-e2e lint typecheck build generate migrate-up migrate-down security smoke
+.PHONY: dev dev-local docker-dev dev-host dev-db test test-backend test-integration test-mcp mcp-bridge test-desktop test-e2e test-e2e-torture functional-e2e hard-e2e lint typecheck build generate migrate-up migrate-down security smoke
 
 PNPM := $(shell if command -v pnpm >/dev/null 2>&1; then printf pnpm; else printf 'npm exec --yes --package=pnpm@10.14.0 -- pnpm'; fi)
 
@@ -25,6 +25,15 @@ test-desktop:
 
 test-e2e:
 	$(PNPM) exec playwright test
+
+test-e2e-torture:
+	$(PNPM) exec playwright test apps/web/e2e/full-system.spec.ts --repeat-each=3 --workers=1
+
+functional-e2e:
+	node scripts/functional-e2e.mjs
+
+hard-e2e:
+	node scripts/hard-e2e.mjs
 
 test-backend:
 	cd backend && go test -race -shuffle=on ./...

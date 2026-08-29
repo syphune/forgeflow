@@ -15,6 +15,7 @@ export type DesktopPhase =
 export type AgentInputSnapshot = {
   repositoryID: string;
   baseCommit: string;
+  branch?: string;
   worktree: string;
   worktreeDiffHash: string;
   prompt: string;

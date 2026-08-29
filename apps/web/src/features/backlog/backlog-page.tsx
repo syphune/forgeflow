@@ -48,7 +48,7 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
   const [keyboardGrabbedID, setKeyboardGrabbedID] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0);
-  const [createOpen, setCreateOpen] = useState(createOnMount || searchParams.get("create") === "1");
+  const createOpen = createOnMount || searchParams.get("create") === "1";
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState("");
   const [newTitle, setNewTitle] = useState("");
@@ -85,6 +85,7 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
       if (cursor) params.set("cursor", cursor);
       if (query) params.set("q", query);
       if (status) params.set("status", status);
+      if (!status) params.set("exclude_terminal", "true");
       if (type) params.set("type", type);
       if (priority) params.set("priority", priority);
       void client.request<WorkItemList>(`/work-items?${params.toString()}`, { projectID, signal: controller.signal })
@@ -92,7 +93,6 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
           setItems(result.items ?? []);
           setNextCursor(result.next_cursor ?? null);
           setBoard(null);
-          setWorkflow(null);
         })
         .catch((cause: unknown) => {
           if (!controller.signal.aborted) setError(apiErrorMessage(cause));
@@ -103,6 +103,17 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
     }
     return () => controller.abort();
   }, [client, cursor, priority, projectID, query, reloadNonce, status, type, view]);
+
+  useEffect(() => {
+    if (view !== "list") return;
+    const controller = new AbortController();
+    void client.request<WorkflowResponse>("/workflows/current", { projectID, signal: controller.signal })
+      .then((loadedWorkflow) => setWorkflow(loadedWorkflow))
+      .catch(() => {
+        if (!controller.signal.aborted) setWorkflow(null);
+      });
+    return () => controller.abort();
+  }, [client, projectID, view]);
 
   useEffect(() => {
     let active = true;
@@ -136,7 +147,6 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
   function openCreate() {
     if (!canCreate) return;
     setCreateError("");
-    setCreateOpen(true);
     const next = new URLSearchParams(searchParams.toString());
     next.set("create", "1");
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
@@ -157,7 +167,6 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
   })();
 
   function closeCreate() {
-    setCreateOpen(false);
     const next = new URLSearchParams(searchParams.toString());
     next.delete("create");
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
@@ -169,7 +178,7 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
     setCreateBusy(true);
     setCreateError("");
     try {
-      const created = await client.createWorkItem({ project_id: projectID, type: newType, title: newTitle.trim(), description: newDescription }, { projectID, idempotencyKey: crypto.randomUUID() });
+      const created = await client.createWorkItem({ project_id: projectID, type: newType, title: newTitle.trim(), description: newDescription, risk_level: "NORMAL" }, { projectID, idempotencyKey: crypto.randomUUID() });
       setItems((current) => [...current, created]);
       setNewTitle("");
       setNewDescription("");
@@ -187,6 +196,10 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
   const canStartAutonomous = authorization?.capabilities.includes("autonomous.start") ?? false;
   const createRoles = rolesForCapabilities(["work_item.create"]).map(label).join(", ");
   const hasFilters = Boolean(query || status || type || priority);
+  const statusValues = useMemo(() => workflow?.statuses.length
+    ? [...workflow.statuses].sort((left, right) => left.position - right.position).map((item) => item.key)
+    : [...new Set(items.map((item) => item.status))], [items, workflow]);
+  const statusFilterLabel = status ? t("backlog.all-statuses") : t("backlog.active-statuses");
 
   useEffect(() => {
     const requestRestore = () => {
@@ -313,7 +326,9 @@ export function BacklogPage({ projectID, basePath, createOnMount = false }: Prop
     <section className="app-v2-page" aria-labelledby="backlog-heading">
       <div className="app-v2-page-heading"><div><p className="eyebrow">{t("backlog.eyebrow")}</p><h2 id="backlog-heading">Backlog</h2><p>{t("backlog.description")}</p>{!authorizationLoading && authorization && !canCreate ? <p className="app-v2-page-permission-note">{t("backlog.create-restricted", { roles: createRoles })}</p> : null}</div></div>
       {!authorizationLoading && canCreate && canStartAutonomous ? <AutonomousIntake projectID={projectID} basePath={basePath} canStart={canStartAutonomous} onCreated={() => setReloadNonce((value) => value + 1)} /> : null}
-      <div className="app-v2-toolbar" role="search"><label className="app-v2-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => updateQuery("q", event.target.value)} placeholder={t("backlog.search")} aria-label={t("backlog.search")} /></label><ForgeSelect ariaLabel={t("backlog.all-statuses")} value={status} options={[{ value: "", label: t("backlog.all-statuses") }, ...[...new Set(items.map((item) => item.status))].map((item) => ({ value: item, label: label(item) }))]} placeholder={t("backlog.all-statuses")} onChange={(value) => updateQuery("status", value)} /><ForgeSelect ariaLabel={t("backlog.all-types")} value={type} options={[{ value: "", label: t("backlog.all-types") }, ...types.map((item) => ({ value: item, label: label(item) }))]} placeholder={t("backlog.all-types")} onChange={(value) => updateQuery("type", value)} /><ForgeSelect ariaLabel={t("backlog.all-priorities")} value={priority} options={[{ value: "", label: t("backlog.all-priorities") }, ...priorities.map((item) => ({ value: item, label: label(item) }))]} placeholder={t("backlog.all-priorities")} onChange={(value) => updateQuery("priority", value)} /><div className="app-v2-view-toggle" role="group" aria-label={t("backlog.view")}><button className={view === "list" ? "is-active" : ""} type="button" onClick={() => updateQuery("view", "list")}>{t("backlog.list")}</button><button className={view === "board" ? "is-active" : ""} type="button" onClick={() => updateQuery("view", "board")}>{t("backlog.board")}</button></div></div>
+      <div className="app-v2-toolbar" role="search"><label className="app-v2-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => updateQuery("q", event.target.value)} placeholder={t("backlog.search")} aria-label={t("backlog.search")} /></label><ForgeSelect ariaLabel={statusFilterLabel} value={status} options={[{ value: "", label: statusFilterLabel }, ...statusValues.map((item) => ({ value: item, label: label(item) }))]} placeholder={statusFilterLabel} onChange={(value) => updateQuery("status", value)} /><ForgeSelect ariaLabel={t("backlog.all-types")} value={type} options={[{ value: "", label: t("backlog.all-types") }, ...types.map((item) => ({ value: item, label: label(item) }))]} placeholder={t("backlog.all-types")} onChange={(value) => updateQuery("type", value)} /><ForgeSelect ariaLabel={t("backlog.all-priorities")} value={priority} options={[{ value: "", label: t("backlog.all-priorities") }, ...priorities.map((item) => ({ value: item, label: label(item) }))]} placeholder={t("backlog.all-priorities")} onChange={(value) => updateQuery("priority", value)} /><div className="app-v2-view-toggle" role="group" aria-label={t("backlog.view")}><button className={view === "list" ? "is-active" : ""} type="button" onClick={() => updateQuery("view", "list")}>{t("backlog.list")}</button><button className={view === "board" ? "is-active" : ""} type="button" onClick={() => updateQuery("view", "board")}>{t("backlog.board")}</button></div></div>
+      {!status ? <p className="app-v2-inline-note">{t("backlog.terminal-hidden")}</p> : null}
+      {view === "board" && board?.done_visibility_days ? <p className="app-v2-inline-note">{t("backlog.done-hidden-after", { days: board.done_visibility_days })} <Link href={`${basePath}/settings/board`}>{t("backlog.open-board-settings")}</Link></p> : null}
       {error ? <div className="app-v2-error-panel" role="alert"><strong>{t("backlog.load-error")}</strong><span>{error}</span><button type="button" onClick={() => setReloadNonce((value) => value + 1)}>{t("app.retry")}</button></div> : null}
       {moveError ? <div className="app-v2-error-panel" role="alert"><strong>{t("backlog.move-error")}</strong><span>{moveError}</span><button type="button" onClick={() => setReloadNonce((value) => value + 1)}>{t("backlog.reload-board")}</button></div> : null}
       <p className="app-v2-sr-only" aria-live="polite">{announcement}</p>

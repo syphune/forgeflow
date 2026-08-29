@@ -11,6 +11,7 @@ type AgentTestStatus = "NOT_RUN" | "PASS" | "FAIL" | "BLOCKED";
 type AgentTestResult = { position: number; status: AgentTestStatus; note: string };
 
 const activeRunStatuses = ["QUEUED", "PREPARING", "PLANNING", "INVESTIGATING", "IMPLEMENTING", "TESTING"];
+const testResultStatuses = ["TESTING", "REVIEWING", "COMPLETED"];
 
 function testResultsForRun(run: AgentRun): Map<number, AgentTestResult> {
   const raw = run.result?.test_cases;
@@ -35,6 +36,7 @@ export function AgentRunsReviewPanel({
   projectID,
   basePath,
   item,
+  repositoryID,
   authorization,
   specificationVersion,
   regressionCases,
@@ -42,6 +44,7 @@ export function AgentRunsReviewPanel({
   projectID: string;
   basePath: string;
   item: WorkItem;
+  repositoryID: string;
   authorization: AuthorizationContext | null;
   specificationVersion?: number;
   regressionCases: RegressionCase[];
@@ -89,14 +92,14 @@ export function AgentRunsReviewPanel({
 
   async function createRun(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!item.repository_id || !prompt.trim() || busyID || !canExecute || !canCreateRun) return;
+    if (!repositoryID || !prompt.trim() || busyID || !canExecute || !canCreateRun) return;
     setBusyID("create");
     setError("");
     try {
       const input: CreateAgentRunRequest = {
         project_id: projectID,
         work_item_id: item.id,
-        repository_id: item.repository_id,
+        repository_id: repositoryID,
         agent_provider: provider.trim(),
         agent_name: agentName.trim() || "Forgeflow Agent",
         execution_inputs: {
@@ -135,7 +138,7 @@ export function AgentRunsReviewPanel({
   }
 
   async function recordTestResult(run: AgentRun, position: number, status: AgentTestStatus) {
-    if (!canRecordResults || run.status === "CANCELLED" || busyID) return;
+    if (!canRecordResults || !testResultStatuses.includes(run.status) || busyID) return;
     const existing = testResultsForRun(run).get(position);
     const note = noteDrafts[`${run.id}:${position}`] ?? existing?.note ?? "";
     if ((status === "FAIL" || status === "BLOCKED") && !note.trim()) {
@@ -156,7 +159,7 @@ export function AgentRunsReviewPanel({
   }
 
   async function saveReviewNote(run: AgentRun) {
-    if (!canRecordResults || run.status === "CANCELLED" || busyID) return;
+    if (!canRecordResults || !testResultStatuses.includes(run.status) || busyID) return;
     const note = reviewDrafts[run.id] ?? reviewNoteForRun(run);
     if (!note.trim()) return;
     setBusyID(`review:${run.id}`);
@@ -189,9 +192,10 @@ export function AgentRunsReviewPanel({
 
   return <section className="app-v2-detail-stack" aria-labelledby="agent-runs-heading">
     <div className="app-v2-surface-card">
-      <div className="app-v2-card-heading"><div><h3 id="agent-runs-heading">{t("work.agent-runs")}</h3><p>{t("work.agent-runs-description")}</p></div><button className="button button-primary" type="button" onClick={() => setFormOpen((current) => !current)} disabled={!canExecute || !item.repository_id || !canCreateRun}>{formOpen ? t("backlog.close") : t("work.new-agent-run")}</button></div>
-      {!item.repository_id ? <div className="app-v2-inline-note">{t("work.agent-repository-required")} <Link href={`${basePath}/repositories`}>{t("nav.repositories")}</Link></div> : null}
+      <div className="app-v2-card-heading"><div><h3 id="agent-runs-heading">{t("work.agent-runs")}</h3><p>{t("work.agent-runs-description")}</p></div><button className="button button-primary" type="button" onClick={() => setFormOpen((current) => !current)} disabled={!canExecute || !repositoryID || !canCreateRun}>{formOpen ? t("backlog.close") : t("work.new-agent-run")}</button></div>
+      {!repositoryID ? <div className="app-v2-inline-note">{t("work.agent-repository-required")} <Link href={`${basePath}/repositories`}>{t("nav.repositories")}</Link></div> : null}
       {item.status === "IN_PROGRESS" && !followUpPositions?.length ? <div className="app-v2-inline-note">{t("work.follow-up-required")}</div> : null}
+      {item.status === "RAW" ? <div className="app-v2-inline-note">{t("work.refining-required")}</div> : null}
       {!canExecute ? <div className="app-v2-inline-note">{t("work.agent-execute-read-only")}</div> : null}
       {error ? <div className="app-v2-error-panel" role="alert"><strong>{t("work.agent-runs-error")}</strong><span>{error}</span><button type="button" onClick={() => void load()}>{t("app.retry")}</button></div> : null}
       {message ? <p className="app-v2-action-status" role="status">{message}</p> : null}
@@ -213,8 +217,8 @@ export function AgentRunsReviewPanel({
             <div className="app-v2-run-card-heading"><div><span className="app-v2-key">{run.agent_name}</span><h4>{run.agent_provider}</h4></div><span className={`app-v2-run-status is-${run.status.toLowerCase()}`}>{statusLabel(run.status)}</span></div>
             <p>{run.execution_inputs?.prompt || t("work.no-agent-prompt")}</p>
             <div className="app-v2-run-meta"><span>{run.approved ? t("work.run-approved") : t("work.run-awaiting-approval")}</span>{regressionCases.length ? <span>{t("work.test-progress", { passed: passedCount, total: regressionCases.length })}</span> : null}{scopedCases.length ? <span>{t("work.follow-up-scope", { count: scopedCases.length })}</span> : null}<span>{run.created_at ? new Intl.DateTimeFormat(typeof document !== "undefined" && document.documentElement.lang === "en" ? "en-US" : "vi-VN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(run.created_at)) : ""}</span></div>
-            <div className="app-v2-run-actions"><button className="button button-secondary" type="button" onClick={() => setSelectedRunID((current) => current === run.id ? "" : run.id)} disabled={!regressionCases.length}>{selected ? t("backlog.close") : t("work.review-tests")}</button>{!run.approved ? <button className="button button-secondary" type="button" onClick={() => void runAction(run, "approve")} disabled={!canApprove || Boolean(busyID)}>{busyID === run.id ? t("work.processing") : t("work.approve-run")}</button> : null}{run.approved && ["QUEUED", "INTERRUPTED"].includes(run.status) ? <button className="button button-primary" type="button" onClick={() => void runAction(run, run.status === "INTERRUPTED" ? "resume" : "start")} disabled={!canExecute || Boolean(busyID)}>{run.status === "INTERRUPTED" ? t("work.resume-run") : t("work.start-run")}</button> : null}{active ? <button className="button button-quiet is-danger" type="button" onClick={() => void runAction(run, "cancel")} disabled={!canExecute || Boolean(busyID)}>{t("work.cancel-run")}</button> : null}</div>
-            {selected ? <div className="app-v2-test-review" aria-label={t("work.test-checklist")}>
+            <div className="app-v2-run-actions"><button className="button button-secondary" type="button" onClick={() => setSelectedRunID((current) => current === run.id ? "" : run.id)} disabled={!regressionCases.length || !testResultStatuses.includes(run.status)}>{selected ? t("backlog.close") : t("work.review-tests")}</button>{!run.approved ? <button className="button button-secondary" type="button" onClick={() => void runAction(run, "approve")} disabled={!canApprove || Boolean(busyID)}>{busyID === run.id ? t("work.processing") : t("work.approve-run")}</button> : null}{run.approved && ["QUEUED", "INTERRUPTED"].includes(run.status) ? <button className="button button-primary" type="button" onClick={() => void runAction(run, run.status === "INTERRUPTED" ? "resume" : "start")} disabled={!canExecute || Boolean(busyID)}>{run.status === "INTERRUPTED" ? t("work.resume-run") : t("work.start-run")}</button> : null}{active ? <button className="button button-quiet is-danger" type="button" onClick={() => void runAction(run, "cancel")} disabled={!canExecute || Boolean(busyID)}>{t("work.cancel-run")}</button> : null}</div>
+            {selected && testResultStatuses.includes(run.status) ? <div className="app-v2-test-review" aria-label={t("work.test-checklist")}>
               <div className="app-v2-test-review-heading"><div><h4>{t("work.test-checklist")}</h4><p>{t("work.test-checklist-help")}</p></div><button className="button button-secondary" type="button" onClick={() => prepareFollowUp(run)} disabled={!canExecute}>{t("work.prepare-follow-up")}</button></div>
               {regressionCases.map((testCase, index) => {
                 const position = testCase.position ?? index + 1;

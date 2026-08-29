@@ -524,6 +524,8 @@ const workflowRuleOptions = [
   ["require_pull_request", "Pull request"],
   ["require_ci_success", "CI success"],
   ["require_permission", "Permission"],
+  ["require_branch_plan", "Branch plan"],
+  ["require_branch_sync", "Branch sync"],
 ] as const;
 const agentRunNextStatus: Record<string, string> = {
   PREPARING: "PLANNING",

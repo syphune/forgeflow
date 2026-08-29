@@ -24,6 +24,36 @@ func TestMemoryStoreListsOnlyOrganizationsForUser(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreCreatesOrganizationOwnerAndWorkspace(t *testing.T) {
+	store := NewMemoryStore()
+	organization, err := store.CreateOrganization(context.Background(), "acme", "Acme", "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	members, err := store.ListOrganizationMembers(context.Background(), organization.ID)
+	if err != nil || len(members) != 1 || members[0].ID != "user-1" || members[0].RoleKey != "owner" {
+		t.Fatalf("organization members = %#v, err = %v", members, err)
+	}
+	workspaces, err := store.ListWorkspaces(context.Background(), organization.ID)
+	if err != nil || len(workspaces) != 1 || workspaces[0].Key != "MAIN" {
+		t.Fatalf("organization workspaces = %#v, err = %v", workspaces, err)
+	}
+}
+
+func TestMemoryStoreHidesEmptyLegacyPersonalOrganization(t *testing.T) {
+	store := NewMemoryStore()
+	store.organizations["legacy"] = Organization{ID: "legacy", Slug: "github-123", DisplayName: "Old personal"}
+	store.organizationMembers["legacy"] = []Member{{ID: "user-1", RoleKey: "owner"}}
+
+	organizations, err := store.ListOrganizations(context.Background(), "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(organizations) != 0 {
+		t.Fatalf("organizations = %#v, want empty", organizations)
+	}
+}
+
 func TestMemoryStoreAddsProjectCreatorAsMember(t *testing.T) {
 	store := NewMemoryStore()
 	store.workspaces["workspace-1"] = Workspace{ID: "workspace-1", OrganizationID: "org-1", Key: "MAIN"}

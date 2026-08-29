@@ -13,6 +13,7 @@ const nextConfig: NextConfig = {
   },
   async headers() {
     const configuredAPI = process.env.NEXT_PUBLIC_FORGEFLOW_API_URL;
+    const developmentScript = process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : "";
     let apiOrigin = "'self'";
     if (configuredAPI) {
       try {
@@ -24,7 +25,7 @@ const nextConfig: NextConfig = {
     return [{
       source: "/(.*)",
       headers: [
-        { key: "Content-Security-Policy", value: `default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ${apiOrigin}` },
+        { key: "Content-Security-Policy", value: `default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'${developmentScript}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ${apiOrigin}` },
         { key: "Permissions-Policy", value: "camera=(), geolocation=(), microphone=()" },
         { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
         { key: "X-Content-Type-Options", value: "nosniff" },

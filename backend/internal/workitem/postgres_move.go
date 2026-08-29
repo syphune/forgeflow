@@ -119,7 +119,14 @@ func (r *PostgresRepository) move(ctx context.Context, exec platformdb.Executor,
 	}
 	// Preserve the existing gap-rank semantics: ordinary moves touch one item;
 	// only exhausted gaps take the server-side rebalance path above.
-	tag, err := exec.Exec(ctx, `UPDATE work_items SET status_id=$1, backlog_rank=$2, version=version+1, updated_at=now() WHERE organization_id=$3 AND project_id=$4 AND id=$5 AND version=$6`, statusID, rank, scope.OrganizationID, scope.ProjectID, current.ID, input.ExpectedVersion)
+	completedAt := "__KEEP__"
+	if statusChanged {
+		completedAt = ""
+		if input.CompletedAt != nil {
+			completedAt = formatDueAt(input.CompletedAt)
+		}
+	}
+	tag, err := exec.Exec(ctx, `UPDATE work_items SET status_id=$1, backlog_rank=$2, completed_at=CASE WHEN $3='__KEEP__' THEN completed_at ELSE NULLIF($3,'')::timestamptz END, version=version+1, updated_at=now() WHERE organization_id=$4 AND project_id=$5 AND id=$6 AND version=$7`, statusID, rank, completedAt, scope.OrganizationID, scope.ProjectID, current.ID, input.ExpectedVersion)
 	if err != nil {
 		return MoveResult{}, fmt.Errorf("move work item: %w", err)
 	}

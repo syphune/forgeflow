@@ -53,7 +53,6 @@ type OAuthStore interface {
 	BeginOAuth(context.Context, string, string, string, time.Time) error
 	ConsumeOAuth(context.Context, string) (string, string, error)
 	UpsertGitHubUser(context.Context, int64, string, string) (string, error)
-	EnsureDefaultOrganization(context.Context, string, int64, string) (string, error)
 }
 
 type PostgresAuthenticator struct {
@@ -80,18 +79,20 @@ func (a *PostgresAuthenticator) Authenticate(ctx context.Context, request Authen
 
 func (a *PostgresAuthenticator) authenticatePAT(ctx context.Context, request AuthenticationRequest) (Actor, error) {
 	rows, err := a.pool.Query(ctx, `
-SELECT pat.user_id::text, pat.organization_id::text, pat.scopes,
-       CASE WHEN pm.user_id IS NULL THEN COALESCE(rp.permission_key, '') ELSE COALESCE(pp.permission_key, '') END
+SELECT COALESCE(p.id::text, ''), pat.user_id::text, pat.organization_id::text, pat.scopes,
+       u.login, u.display_name, COALESCE(rp.permission_key, ''), COALESCE(pp.permission_key, ''), pm.user_id IS NOT NULL
 FROM personal_access_tokens pat
+JOIN users u ON u.id=pat.user_id
 JOIN organization_memberships om ON om.organization_id=pat.organization_id AND om.user_id=pat.user_id
-JOIN projects p ON p.organization_id=om.organization_id AND ($4='' OR p.id::text=$4)
+LEFT JOIN projects p ON p.organization_id=om.organization_id AND ($4='' OR p.id::text=$4)
 LEFT JOIN roles r ON r.key=om.role_key
 LEFT JOIN role_permissions rp ON rp.role_key=r.key
-LEFT JOIN project_memberships pm ON pm.organization_id=om.organization_id AND pm.project_id::text=$4 AND pm.user_id=pat.user_id
+LEFT JOIN project_memberships pm ON pm.organization_id=om.organization_id AND pm.project_id=p.id AND pm.user_id=pat.user_id
 LEFT JOIN roles pr ON pr.key=pm.role_key
 LEFT JOIN role_permissions pp ON pp.role_key=pr.key
 WHERE pat.token_hash=$1 AND pat.revoked_at IS NULL AND pat.expires_at > $2
   AND ($3='' OR pat.organization_id::text=$3)
+  AND ($4='' OR p.id IS NOT NULL)
 `, hashToken(request.BearerToken), a.now().UTC(), request.OrganizationID, request.ProjectID)
 	if err != nil {
 		return Actor{}, fmt.Errorf("authenticate PAT: %w", err)
@@ -99,22 +100,34 @@ WHERE pat.token_hash=$1 AND pat.revoked_at IS NULL AND pat.expires_at > $2
 	defer rows.Close()
 	var actor Actor
 	var scopes []string
-	roleCapabilities := make(map[string]bool)
+	organizationCapabilities := make(map[string]bool)
+	projectCapabilities := make(map[string]map[string]bool)
 	for rows.Next() {
-		var userID, organizationID, permission string
+		var projectID, userID, organizationID, login, displayName, organizationPermission, projectPermission string
+		var projectMember bool
 		var rowScopes []string
-		if err := rows.Scan(&userID, &organizationID, &rowScopes, &permission); err != nil {
+		if err := rows.Scan(&projectID, &userID, &organizationID, &rowScopes, &login, &displayName, &organizationPermission, &projectPermission, &projectMember); err != nil {
 			return Actor{}, fmt.Errorf("scan PAT identity: %w", err)
 		}
 		if request.OrganizationID != "" && request.OrganizationID != organizationID {
 			continue
 		}
 		if actor.ID == "" {
-			actor = Actor{Type: "human", ID: userID, OrganizationID: organizationID, Source: "pat"}
+			actor = Actor{Type: "human", ID: userID, Login: login, DisplayName: displayName, OrganizationID: organizationID, Source: "pat"}
 			scopes = rowScopes
 		}
-		if permission != "" {
-			roleCapabilities[permission] = true
+		if organizationPermission != "" {
+			organizationCapabilities[organizationPermission] = true
+		}
+		effectivePermission := organizationPermission
+		if projectMember {
+			effectivePermission = projectPermission
+		}
+		if effectivePermission != "" && projectID != "" {
+			if projectCapabilities[projectID] == nil {
+				projectCapabilities[projectID] = make(map[string]bool)
+			}
+			projectCapabilities[projectID][effectivePermission] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -123,29 +136,30 @@ WHERE pat.token_hash=$1 AND pat.revoked_at IS NULL AND pat.expires_at > $2
 	if actor.ID == "" {
 		return Actor{}, apperr.New(apperr.CodeUnauthorized, 401, "invalid or expired access token", nil)
 	}
-	actor.Capabilities = make(map[string]bool, len(scopes))
-	for _, scope := range scopes {
-		if roleCapabilities[scope] {
-			actor.Capabilities[scope] = true
-		}
+	actor.Capabilities = intersectCapabilities(organizationCapabilities, scopes, true)
+	actor.ProjectCapabilities = filterProjectCapabilities(projectCapabilities, scopes, true)
+	if request.ProjectID != "" {
+		actor.Capabilities = actor.ProjectCapabilities[request.ProjectID]
 	}
 	return actor, nil
 }
 
 func (a *PostgresAuthenticator) authenticateSession(ctx context.Context, request AuthenticationRequest) (Actor, error) {
 	rows, err := a.pool.Query(ctx, `
-SELECT s.user_id::text, om.organization_id::text,
-       CASE WHEN pm.user_id IS NULL THEN COALESCE(rp.permission_key, '') ELSE COALESCE(pp.permission_key, '') END
+SELECT COALESCE(p.id::text, ''), s.user_id::text, COALESCE(om.organization_id::text, ''),
+       u.login, u.display_name, COALESCE(rp.permission_key, ''), COALESCE(pp.permission_key, ''), pm.user_id IS NOT NULL
 FROM sessions s
-JOIN organization_memberships om ON om.user_id=s.user_id
-JOIN projects p ON p.organization_id=om.organization_id AND ($4='' OR p.id::text=$4)
+JOIN users u ON u.id=s.user_id
+LEFT JOIN organization_memberships om ON om.user_id=s.user_id
+LEFT JOIN projects p ON p.organization_id=om.organization_id AND ($4='' OR p.id::text=$4)
 LEFT JOIN roles r ON r.key=om.role_key
 LEFT JOIN role_permissions rp ON rp.role_key=r.key
-LEFT JOIN project_memberships pm ON pm.organization_id=om.organization_id AND pm.project_id::text=$4 AND pm.user_id=s.user_id
+LEFT JOIN project_memberships pm ON pm.organization_id=om.organization_id AND pm.project_id=p.id AND pm.user_id=s.user_id
 LEFT JOIN roles pr ON pr.key=pm.role_key
 LEFT JOIN role_permissions pp ON pp.role_key=pr.key
 WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at > $2
   AND ($3='' OR om.organization_id::text=$3)
+  AND ($4='' OR p.id IS NOT NULL)
 `, hashToken(request.SessionToken), a.now().UTC(), request.OrganizationID, request.ProjectID)
 	if err != nil {
 		return Actor{}, fmt.Errorf("authenticate session: %w", err)
@@ -153,20 +167,36 @@ WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at > $2
 	defer rows.Close()
 	var actor Actor
 	organizations := make(map[string]bool)
+	organizationCapabilities := make(map[string]bool)
+	projectCapabilities := make(map[string]map[string]bool)
 	for rows.Next() {
-		var userID, organizationID, permission string
-		if err := rows.Scan(&userID, &organizationID, &permission); err != nil {
+		var projectID, userID, organizationID, login, displayName, organizationPermission, projectPermission string
+		var projectMember bool
+		if err := rows.Scan(&projectID, &userID, &organizationID, &login, &displayName, &organizationPermission, &projectPermission, &projectMember); err != nil {
 			return Actor{}, fmt.Errorf("scan session identity: %w", err)
 		}
-		organizations[organizationID] = true
 		if actor.ID == "" {
-			actor = Actor{Type: "human", ID: userID, OrganizationID: organizationID, Source: "session", Capabilities: make(map[string]bool)}
+			actor = Actor{Type: "human", ID: userID, Login: login, DisplayName: displayName, OrganizationID: organizationID, Source: "session", Capabilities: make(map[string]bool)}
 		}
+		if organizationID == "" {
+			continue
+		}
+		organizations[organizationID] = true
 		if organizationID != actor.OrganizationID {
 			continue
 		}
-		if permission != "" {
-			actor.Capabilities[permission] = true
+		if organizationPermission != "" {
+			organizationCapabilities[organizationPermission] = true
+		}
+		effectivePermission := organizationPermission
+		if projectMember {
+			effectivePermission = projectPermission
+		}
+		if effectivePermission != "" && projectID != "" {
+			if projectCapabilities[projectID] == nil {
+				projectCapabilities[projectID] = make(map[string]bool)
+			}
+			projectCapabilities[projectID][effectivePermission] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -175,7 +205,42 @@ WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at > $2
 	if actor.ID == "" || (request.OrganizationID == "" && len(organizations) != 1 && !request.AllowOrganizationSelection) {
 		return Actor{}, apperr.New(apperr.CodeUnauthorized, 401, "invalid session or organization selection is required", nil)
 	}
+	actor.Capabilities = organizationCapabilities
+	actor.ProjectCapabilities = projectCapabilities
+	if request.ProjectID != "" {
+		actor.Capabilities = actor.ProjectCapabilities[request.ProjectID]
+	}
 	return actor, nil
+}
+
+func intersectCapabilities(capabilities map[string]bool, scopes []string, restrict bool) map[string]bool {
+	result := make(map[string]bool)
+	if !restrict {
+		for capability, enabled := range capabilities {
+			if enabled {
+				result[capability] = true
+			}
+		}
+		return result
+	}
+	allowed := make(map[string]bool, len(scopes))
+	for _, scope := range scopes {
+		allowed[scope] = true
+	}
+	for capability, enabled := range capabilities {
+		if enabled && allowed[capability] {
+			result[capability] = true
+		}
+	}
+	return result
+}
+
+func filterProjectCapabilities(projects map[string]map[string]bool, scopes []string, restrict bool) map[string]map[string]bool {
+	result := make(map[string]map[string]bool, len(projects))
+	for projectID, capabilities := range projects {
+		result[projectID] = intersectCapabilities(capabilities, scopes, restrict)
+	}
+	return result
 }
 
 type PostgresTokenStore struct{ pool *pgxpool.Pool }

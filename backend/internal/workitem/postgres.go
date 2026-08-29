@@ -27,7 +27,7 @@ const workItemSelect = `
 	       wi.number, p.key || '-' || wi.number, wit.key, wi.title, wi.description, ws.key,
 	       COALESCE(wi.parent_id::text, ''), wi.priority, COALESCE(wi.assignee_id::text, ''),
 	       COALESCE(wi.reporter_id::text, ''), wi.due_at, wi.estimate_points, wi.backlog_rank, COALESCE(wi.repository_id::text, ''), COALESCE(wi.sprint_id::text, ''),
-	       wi.version, wi.archived_at, COALESCE(wi.archived_by, ''), wi.created_at, wi.updated_at
+	       wi.version, wi.archived_at, COALESCE(wi.archived_by, ''), wi.completed_at, wi.created_at, wi.updated_at, wi.risk_level
 FROM work_items wi
 JOIN projects p ON p.organization_id = wi.organization_id AND p.id = wi.project_id
 JOIN work_item_types wit ON wit.id = wi.work_item_type_id
@@ -110,9 +110,9 @@ func (r *PostgresRepository) create(ctx context.Context, exec platformdb.Executo
 	}
 	var id string
 	if err := exec.QueryRow(ctx, `
-	INSERT INTO work_items (organization_id, workspace_id, project_id, number, work_item_type_id, parent_id, title, description, status_id, priority, reporter_id, assignee_id, due_at, estimate_points, backlog_rank, repository_id, sprint_id)
-	VALUES ($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,$7,$8,$9,COALESCE(NULLIF($10,''),'MEDIUM'),NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::timestamptz,$14,$15,NULLIF($16,'')::uuid,NULLIF($17,'')::uuid)
-	RETURNING id::text`, scope.OrganizationID, workspaceID, scope.ProjectID, number, typeID, input.ParentID, strings.TrimSpace(input.Title), input.Description, rawStatusID, strings.ToUpper(strings.TrimSpace(input.Priority)), input.ReporterID, input.AssigneeID, formatDueAt(input.DueAt), input.EstimatePoints, backlogRank, input.RepositoryID, input.SprintID).Scan(&id); err != nil {
+	INSERT INTO work_items (organization_id, workspace_id, project_id, number, work_item_type_id, parent_id, title, description, status_id, priority, reporter_id, assignee_id, due_at, estimate_points, backlog_rank, repository_id, sprint_id, risk_level)
+	VALUES ($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,$7,$8,$9,COALESCE(NULLIF($10,''),'MEDIUM'),NULLIF($11,'')::uuid,NULLIF($12,'')::uuid,NULLIF($13,'')::timestamptz,$14,$15,NULLIF($16,'')::uuid,NULLIF($17,'')::uuid,COALESCE(NULLIF($18,''),'NORMAL'))
+	RETURNING id::text`, scope.OrganizationID, workspaceID, scope.ProjectID, number, typeID, input.ParentID, strings.TrimSpace(input.Title), input.Description, rawStatusID, strings.ToUpper(strings.TrimSpace(input.Priority)), input.ReporterID, input.AssigneeID, formatDueAt(input.DueAt), input.EstimatePoints, backlogRank, input.RepositoryID, input.SprintID, normalizedRiskLevel(input.RiskLevel)).Scan(&id); err != nil {
 		return nil, fmt.Errorf("insert work item: %w", err)
 	}
 	return scanWorkItem(exec.QueryRow(ctx, workItemSelect+` WHERE wi.organization_id=$1 AND wi.project_id=$2 AND wi.id=$3`, scope.OrganizationID, scope.ProjectID, id))
@@ -153,6 +153,15 @@ func (r *PostgresRepository) ListPage(ctx context.Context, scope Scope, filter L
 	args := []any{scope.OrganizationID, scope.ProjectID}
 	if !filter.IncludeArchived {
 		query += ` AND wi.archived_at IS NULL`
+	}
+	for _, status := range filter.ExcludedStatuses {
+		if filter.ExcludeTerminal || filter.ExcludeTerminalCompletedBefore == nil {
+			query += fmt.Sprintf(" AND ws.key<>$%d", len(args)+1)
+			args = append(args, status)
+			continue
+		}
+		query += fmt.Sprintf(" AND NOT (ws.key=$%d AND wi.completed_at IS NOT NULL AND wi.completed_at<$%d)", len(args)+1, len(args)+2)
+		args = append(args, status, *filter.ExcludeTerminalCompletedBefore)
 	}
 	if status := strings.TrimSpace(filter.Status); status != "" {
 		query += fmt.Sprintf(" AND ws.key=$%d", len(args)+1)
@@ -291,6 +300,16 @@ func (r *PostgresRepository) update(ctx context.Context, exec platformdb.Executo
 	if updated.SprintID != current.SprintID {
 		sprint = updated.SprintID
 	}
+	completedAt := "__KEEP__"
+	if updated.CompletedAt == nil && current.CompletedAt != nil {
+		completedAt = ""
+	} else if updated.CompletedAt != nil && (current.CompletedAt == nil || !updated.CompletedAt.Equal(*current.CompletedAt)) {
+		completedAt = formatDueAt(updated.CompletedAt)
+	}
+	riskLevel := "__KEEP__"
+	if updated.RiskLevel != current.RiskLevel {
+		riskLevel = string(normalizedRiskLevel(updated.RiskLevel))
+	}
 	commandTag, err := exec.Exec(ctx, `
 UPDATE work_items wi
 SET title=$1,
@@ -302,16 +321,18 @@ SET title=$1,
     priority=CASE WHEN $7='__KEEP__' THEN wi.priority ELSE $7 END,
     due_at=CASE WHEN $8='__KEEP__' THEN wi.due_at ELSE NULLIF($8,'')::timestamptz END,
     estimate_points=CASE WHEN $9='__KEEP__' THEN wi.estimate_points ELSE NULLIF($9,'')::integer END,
-    sprint_id=CASE WHEN $10='__KEEP__' THEN wi.sprint_id ELSE NULLIF($10,'')::uuid END,
-    version=wi.version+1,
+	    sprint_id=CASE WHEN $10='__KEEP__' THEN wi.sprint_id ELSE NULLIF($10,'')::uuid END,
+	    completed_at=CASE WHEN $11='__KEEP__' THEN wi.completed_at ELSE NULLIF($11,'')::timestamptz END,
+	    risk_level=CASE WHEN $16='__KEEP__' THEN wi.risk_level ELSE $16 END,
+	    version=wi.version+1,
     updated_at=now()
-WHERE wi.organization_id=$11 AND wi.project_id=$12 AND wi.id=$13 AND wi.version=$14
+WHERE wi.organization_id=$12 AND wi.project_id=$13 AND wi.id=$14 AND wi.version=$15
 	  AND ($3='__KEEP__' OR $3='' OR EXISTS (SELECT 1 FROM work_items parent WHERE parent.organization_id=wi.organization_id AND parent.project_id=wi.project_id AND parent.id=NULLIF($3,'')::uuid))
 	  AND ($4='__KEEP__' OR $4='' OR EXISTS (SELECT 1 FROM repository_links rl WHERE rl.organization_id=wi.organization_id AND rl.project_id=wi.project_id AND rl.repository_id=NULLIF($4,'')::uuid))
 	  AND ($5='' OR EXISTS (SELECT 1 FROM workflow_statuses ws JOIN workflows w ON w.id=ws.workflow_id WHERE w.organization_id=wi.organization_id AND w.project_id=wi.project_id AND ws.key=$5))
 	  AND ($6='__KEEP__' OR $6='' OR EXISTS (SELECT 1 FROM organization_memberships om WHERE om.organization_id=wi.organization_id AND om.user_id=NULLIF($6,'')::uuid))
-  AND ($10='__KEEP__' OR $10='' OR EXISTS (SELECT 1 FROM sprints s WHERE s.organization_id=wi.organization_id AND s.project_id=wi.project_id AND s.id=NULLIF($10,'')::uuid))`,
-		updated.Title, updated.Description, parent, repository, statusKey, assignee, priority, dueAt, estimate, sprint, scope.OrganizationID, scope.ProjectID, id, expectedVersion)
+	  AND ($10='__KEEP__' OR $10='' OR EXISTS (SELECT 1 FROM sprints s WHERE s.organization_id=wi.organization_id AND s.project_id=wi.project_id AND s.id=NULLIF($10,'')::uuid))`,
+		updated.Title, updated.Description, parent, repository, statusKey, assignee, priority, dueAt, estimate, sprint, completedAt, scope.OrganizationID, scope.ProjectID, id, expectedVersion, riskLevel)
 	if err != nil {
 		return nil, fmt.Errorf("update work item: %w", err)
 	}
@@ -397,7 +418,7 @@ type rowScanner interface {
 func scanWorkItem(row rowScanner) (*WorkItem, error) {
 	var item WorkItem
 	var itemType, status string
-	if err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.ProjectID, &item.Number, &item.Key, &itemType, &item.Title, &item.Description, &status, &item.ParentID, &item.Priority, &item.AssigneeID, &item.ReporterID, &item.DueAt, &item.EstimatePoints, &item.BacklogRank, &item.RepositoryID, &item.SprintID, &item.Version, &item.ArchivedAt, &item.ArchivedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.ProjectID, &item.Number, &item.Key, &itemType, &item.Title, &item.Description, &status, &item.ParentID, &item.Priority, &item.AssigneeID, &item.ReporterID, &item.DueAt, &item.EstimatePoints, &item.BacklogRank, &item.RepositoryID, &item.SprintID, &item.Version, &item.ArchivedAt, &item.ArchivedBy, &item.CompletedAt, &item.CreatedAt, &item.UpdatedAt, &item.RiskLevel); err != nil {
 		return nil, mapDatabaseError(err, "work item not found")
 	}
 	item.Type = Type(itemType)

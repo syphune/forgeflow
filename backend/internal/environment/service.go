@@ -14,10 +14,22 @@ import (
 )
 
 type Service struct {
-	store       Store
-	recorder    MutationRecorder
-	transaction TransactionRunner
-	now         func() time.Time
+	store           Store
+	recorder        MutationRecorder
+	transaction     TransactionRunner
+	now             func() time.Time
+	releaseEvidence ReleaseApprovalEvidenceProvider
+}
+
+type ReleaseApprovalEvidence struct {
+	Found            bool
+	AuthorLogin      string
+	HeadSHA          string
+	ApprovedByLogins []string
+}
+
+type ReleaseApprovalEvidenceProvider interface {
+	ReleaseApprovalEvidence(context.Context, string, string, string, string) (ReleaseApprovalEvidence, error)
 }
 
 type MutationRecorder struct {
@@ -55,9 +67,68 @@ func NewService(store Store, options ...Options) *Service {
 	return &Service{store: store, recorder: configured.Recorder, transaction: configured.Transaction, now: configured.Now}
 }
 
+func (s *Service) SetReleaseApprovalEvidence(provider ReleaseApprovalEvidenceProvider) {
+	s.releaseEvidence = provider
+}
+
 // Policy implements the internal autonomous.PolicyProvider contract.
 func (s *Service) Policy(ctx context.Context, organizationID, projectID string) (autonomous.Policy, error) {
 	return s.store.GetPolicy(ctx, organizationID, projectID)
+}
+
+func (s *Service) GetDeliveryPolicy(ctx context.Context, actor identity.Actor, projectID string) (DeliveryPolicy, error) {
+	if err := require(actor, identity.CapabilityProjectRead); err != nil {
+		return DeliveryPolicy{}, err
+	}
+	policy, err := s.store.GetDeliveryPolicy(ctx, actor.OrganizationID, strings.TrimSpace(projectID))
+	if err != nil {
+		return DeliveryPolicy{}, err
+	}
+	policy.OrganizationID, policy.ProjectID = actor.OrganizationID, strings.TrimSpace(projectID)
+	return policy.Normalize(), nil
+}
+
+func (s *Service) DeliveryPolicy(ctx context.Context, organizationID, projectID string) (DeliveryPolicy, error) {
+	policy, err := s.store.GetDeliveryPolicy(ctx, organizationID, projectID)
+	if err != nil {
+		return DeliveryPolicy{}, err
+	}
+	return policy.Normalize(), nil
+}
+
+func (s *Service) SetDeliveryPolicy(ctx context.Context, actor identity.Actor, projectID string, policy DeliveryPolicy) (DeliveryPolicy, error) {
+	if err := require(actor, identity.CapabilityProjectManage); err != nil {
+		return DeliveryPolicy{}, err
+	}
+	policy.OrganizationID = actor.OrganizationID
+	policy.ProjectID = strings.TrimSpace(projectID)
+	if policy.ProjectID == "" {
+		return DeliveryPolicy{}, apperr.New(apperr.CodeInvalidArgument, 422, "project_id is required", nil)
+	}
+	policy = policy.Normalize()
+	if err := policy.Validate(); err != nil {
+		return DeliveryPolicy{}, apperr.New(apperr.CodeInvalidArgument, 422, err.Error(), nil)
+	}
+	var result DeliveryPolicy
+	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		before, getErr := s.store.GetDeliveryPolicy(txCtx, actor.OrganizationID, policy.ProjectID)
+		if getErr != nil {
+			return getErr
+		}
+		var saveErr error
+		result, saveErr = s.store.SetDeliveryPolicy(txCtx, actor.OrganizationID, policy, policy.Version)
+		if saveErr != nil {
+			return saveErr
+		}
+		if saveErr = s.record(txCtx, actor, "delivery_policy.updated", result.ID, before, result); saveErr != nil {
+			return saveErr
+		}
+		return s.emit(txCtx, actor.OrganizationID, result.ID, "delivery_policy.updated", map[string]any{"project_id": result.ProjectID, "version": result.Version})
+	})
+	if err != nil {
+		return DeliveryPolicy{}, err
+	}
+	return result, nil
 }
 
 func (s *Service) GetPolicy(ctx context.Context, actor identity.Actor, projectID string) (autonomous.Policy, error) {
@@ -120,6 +191,12 @@ func (s *Service) Create(ctx context.Context, actor identity.Actor, input Create
 	}
 	if len(input.SecretRefs) > 30 {
 		return Environment{}, apperr.New(apperr.CodeInvalidArgument, 422, "at most 30 secret references are allowed", nil)
+	}
+	if input.SecretRefs == nil {
+		input.SecretRefs = []string{}
+	}
+	if input.Metadata == nil {
+		input.Metadata = map[string]any{}
 	}
 	var item Environment
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
@@ -196,8 +273,38 @@ func (s *Service) ApproveDeployment(ctx context.Context, actor identity.Actor, p
 	if actor.Type != "human" {
 		return DeploymentRequest{}, apperr.New(apperr.CodeForbidden, 403, "only a human can approve a deployment", nil)
 	}
+	requested, err := s.store.GetDeployment(ctx, actor.OrganizationID, projectID, id)
+	if err != nil {
+		return DeploymentRequest{}, err
+	}
+	environments, err := s.store.List(ctx, actor.OrganizationID, projectID)
+	if err != nil {
+		return DeploymentRequest{}, err
+	}
+	production := false
+	for _, environment := range environments {
+		if environment.ID == requested.EnvironmentID {
+			production = environment.Kind == "production"
+			break
+		}
+	}
+	if production {
+		if strings.TrimSpace(requested.WorkItemID) == "" || strings.TrimSpace(actor.Login) == "" || s.releaseEvidence == nil {
+			return DeploymentRequest{}, apperr.New(apperr.CodeForbidden, 403, "production approval requires a linked work item and independent pull-request evidence", nil)
+		}
+		evidence, evidenceErr := s.releaseEvidence.ReleaseApprovalEvidence(ctx, actor.OrganizationID, projectID, requested.WorkItemID, requested.CommitSHA)
+		if evidenceErr != nil {
+			return DeploymentRequest{}, evidenceErr
+		}
+		if !evidence.Found || !strings.EqualFold(strings.TrimSpace(evidence.HeadSHA), strings.TrimSpace(requested.CommitSHA)) {
+			return DeploymentRequest{}, apperr.New(apperr.CodeInvalidArgument, 422, "production approval requires a pull request for the deployed commit", nil)
+		}
+		if strings.EqualFold(strings.TrimSpace(actor.Login), strings.TrimSpace(evidence.AuthorLogin)) || containsLogin(evidence.ApprovedByLogins, actor.Login) {
+			return DeploymentRequest{}, apperr.New(apperr.CodeForbidden, 403, "production approver must be separate from the PR author and reviewers", nil)
+		}
+	}
 	var item DeploymentRequest
-	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+	err = s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
 		var approveErr error
 		item, approveErr = s.store.ApproveDeployment(txCtx, actor.OrganizationID, projectID, id, actor.ID)
 		if approveErr != nil {
@@ -212,6 +319,15 @@ func (s *Service) ApproveDeployment(ctx context.Context, actor identity.Actor, p
 		return DeploymentRequest{}, err
 	}
 	return item, nil
+}
+
+func containsLogin(values []string, login string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(login)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) UpdateDeploymentStatus(ctx context.Context, actor identity.Actor, projectID, id string, input StatusInput) (DeploymentRequest, error) {
@@ -234,6 +350,36 @@ func (s *Service) UpdateDeploymentStatus(ctx context.Context, actor identity.Act
 		return DeploymentRequest{}, err
 	}
 	return item, nil
+}
+
+func (s *Service) VerifyDeployment(ctx context.Context, actor identity.Actor, projectID, id string) (DeploymentRequest, error) {
+	if err := require(actor, identity.CapabilityProductionVerify); err != nil {
+		return DeploymentRequest{}, err
+	}
+	if actor.Type != "human" {
+		return DeploymentRequest{}, apperr.New(apperr.CodeForbidden, 403, "only a human can verify production", nil)
+	}
+	var item DeploymentRequest
+	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		var verifyErr error
+		item, verifyErr = s.store.VerifyDeployment(txCtx, actor.OrganizationID, projectID, id, actor.ID)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if verifyErr = s.record(txCtx, actor, "deployment.verified", id, nil, item); verifyErr != nil {
+			return verifyErr
+		}
+		return s.emit(txCtx, actor.OrganizationID, id, "deployment.verified", map[string]any{"project_id": projectID, "status": item.Status})
+	})
+	return item, err
+}
+
+func (s *Service) HasSuccessfulDeployment(ctx context.Context, organizationID, projectID, workItemID string) (bool, error) {
+	return s.store.HasDeploymentStatus(ctx, organizationID, projectID, workItemID, DeploymentSuccess, "")
+}
+
+func (s *Service) HasProductionVerification(ctx context.Context, organizationID, projectID, workItemID string) (bool, error) {
+	return s.store.HasDeploymentStatus(ctx, organizationID, projectID, workItemID, DeploymentVerified, "production")
 }
 
 func (s *Service) record(ctx context.Context, actor identity.Actor, action, resourceID string, before, after any) error {

@@ -9,37 +9,47 @@ import (
 )
 
 type Config struct {
-	HTTPAddress             string
-	DatabaseURL             string
-	Environment             string
-	MaxBodyBytes            int64
-	RequestIDName           string
-	GitHubOAuthClientID     string
-	GitHubOAuthClientSecret string
-	GitHubOAuthRedirectURL  string
-	WebBaseURL              string
-	WebAllowedOrigins       []string
-	SecureCookies           bool
-	GitHubWebhookSecret     string
-	GitHubAppID             int64
-	GitHubAppSlug           string
-	GitHubAppPrivateKey     string
-	GitHubAppCallbackURL    string
-	MetricsToken            string
-	AttachmentDir           string
-	AttachmentStorage       string
-	AttachmentS3Endpoint    string
-	AttachmentS3AccessKey   string
-	AttachmentS3SecretKey   string
-	AttachmentS3Region      string
-	AttachmentS3Bucket      string
-	AttachmentS3Prefix      string
-	AttachmentS3Secure      bool
-	OTELEndpoint            string
-	OTELServiceName         string
-	RunnerURL               string
-	RunnerToken             string
-	RunnerWorkspaceRoot     string
+	HTTPAddress                 string
+	DatabaseURL                 string
+	Environment                 string
+	MaxBodyBytes                int64
+	RequestIDName               string
+	GitHubOAuthClientID         string
+	GitHubOAuthClientSecret     string
+	GitHubOAuthRedirectURL      string
+	WebBaseURL                  string
+	WebAllowedOrigins           []string
+	SecureCookies               bool
+	GitHubWebhookSecret         string
+	GitHubAppID                 int64
+	GitHubAppSlug               string
+	GitHubAppPrivateKey         string
+	GitHubAppCallbackURL        string
+	GitHubAppClientID           string
+	GitHubAppClientSecret       string
+	GitHubAppUserCallbackURL    string
+	GitHubAppTokenEncryptionKey string
+	MetricsToken                string
+	AttachmentDir               string
+	AttachmentStorage           string
+	AttachmentS3Endpoint        string
+	AttachmentS3AccessKey       string
+	AttachmentS3SecretKey       string
+	AttachmentS3Region          string
+	AttachmentS3Bucket          string
+	AttachmentS3Prefix          string
+	AttachmentS3Secure          bool
+	OTELEndpoint                string
+	OTELServiceName             string
+	RunnerURL                   string
+	RunnerToken                 string
+	RunnerWorkspaceRoot         string
+	RunnerImage                 string
+	RunnerCPULimit              string
+	RunnerMemoryLimit           string
+	RunnerPidsLimit             int
+	RunnerNetworkMode           string
+	RunnerDockerWorkspaceRoot   string
 }
 
 func Load() (Config, error) {
@@ -59,36 +69,53 @@ func Load() (Config, error) {
 		}
 	}
 	c := Config{
-		HTTPAddress:             value("FORGEFLOW_HTTP_ADDRESS", ":8080"),
-		DatabaseURL:             os.Getenv("DATABASE_URL"),
-		Environment:             value("FORGEFLOW_ENV", "development"),
-		MaxBodyBytes:            1 << 20,
-		RequestIDName:           "X-Request-ID",
-		GitHubOAuthClientID:     value("FORGEFLOW_GITHUB_OAUTH_CLIENT_ID", ""),
-		GitHubOAuthClientSecret: value("FORGEFLOW_GITHUB_OAUTH_CLIENT_SECRET", ""),
-		GitHubOAuthRedirectURL:  value("FORGEFLOW_GITHUB_OAUTH_REDIRECT_URL", "http://localhost:8080/api/v1/auth/github/callback"),
-		WebBaseURL:              webBaseURL,
-		WebAllowedOrigins:       webAllowedOrigins,
-		SecureCookies:           os.Getenv("FORGEFLOW_SECURE_COOKIES") == "true",
-		GitHubWebhookSecret:     os.Getenv("FORGEFLOW_GITHUB_WEBHOOK_SECRET"),
-		GitHubAppSlug:           strings.TrimSpace(os.Getenv("FORGEFLOW_GITHUB_APP_SLUG")),
-		GitHubAppPrivateKey:     privateKey,
-		GitHubAppCallbackURL:    value("FORGEFLOW_GITHUB_APP_CALLBACK_URL", strings.TrimRight(webBaseURL, "/")+"/api/v1/integrations/github/install/callback"),
-		MetricsToken:            os.Getenv("FORGEFLOW_METRICS_TOKEN"),
-		AttachmentDir:           value("FORGEFLOW_ATTACHMENTS_DIR", "./data/attachments"),
-		AttachmentStorage:       value("FORGEFLOW_ATTACHMENT_STORAGE", "local"),
-		AttachmentS3Endpoint:    strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_ENDPOINT")),
-		AttachmentS3AccessKey:   strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_ACCESS_KEY")),
-		AttachmentS3SecretKey:   os.Getenv("FORGEFLOW_ATTACHMENT_S3_SECRET_KEY"),
-		AttachmentS3Region:      value("FORGEFLOW_ATTACHMENT_S3_REGION", "us-east-1"),
-		AttachmentS3Bucket:      strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_BUCKET")),
-		AttachmentS3Prefix:      strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_PREFIX")),
-		AttachmentS3Secure:      os.Getenv("FORGEFLOW_ATTACHMENT_S3_SECURE") == "true",
-		OTELEndpoint:            strings.TrimSpace(os.Getenv("FORGEFLOW_OTEL_ENDPOINT")),
-		OTELServiceName:         value("FORGEFLOW_OTEL_SERVICE_NAME", "forgeflow-api"),
-		RunnerURL:               strings.TrimRight(strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_URL")), "/"),
-		RunnerToken:             os.Getenv("FORGEFLOW_RUNNER_TOKEN"),
-		RunnerWorkspaceRoot:     value("FORGEFLOW_RUNNER_WORKSPACE_ROOT", "/var/lib/forgeflow/workspaces"),
+		HTTPAddress:                 value("FORGEFLOW_HTTP_ADDRESS", ":8080"),
+		DatabaseURL:                 os.Getenv("DATABASE_URL"),
+		Environment:                 value("FORGEFLOW_ENV", "development"),
+		MaxBodyBytes:                1 << 20,
+		RequestIDName:               "X-Request-ID",
+		GitHubOAuthClientID:         value("FORGEFLOW_GITHUB_OAUTH_CLIENT_ID", ""),
+		GitHubOAuthClientSecret:     value("FORGEFLOW_GITHUB_OAUTH_CLIENT_SECRET", ""),
+		GitHubOAuthRedirectURL:      value("FORGEFLOW_GITHUB_OAUTH_REDIRECT_URL", "http://localhost:8080/api/v1/auth/github/callback"),
+		WebBaseURL:                  webBaseURL,
+		WebAllowedOrigins:           webAllowedOrigins,
+		SecureCookies:               os.Getenv("FORGEFLOW_SECURE_COOKIES") == "true",
+		GitHubWebhookSecret:         os.Getenv("FORGEFLOW_GITHUB_WEBHOOK_SECRET"),
+		GitHubAppSlug:               strings.TrimSpace(os.Getenv("FORGEFLOW_GITHUB_APP_SLUG")),
+		GitHubAppPrivateKey:         privateKey,
+		GitHubAppCallbackURL:        value("FORGEFLOW_GITHUB_APP_CALLBACK_URL", strings.TrimRight(webBaseURL, "/")+"/api/v1/integrations/github/install/callback"),
+		GitHubAppClientID:           strings.TrimSpace(os.Getenv("FORGEFLOW_GITHUB_APP_CLIENT_ID")),
+		GitHubAppClientSecret:       os.Getenv("FORGEFLOW_GITHUB_APP_CLIENT_SECRET"),
+		GitHubAppUserCallbackURL:    value("FORGEFLOW_GITHUB_APP_USER_CALLBACK_URL", strings.TrimRight(webBaseURL, "/")+"/api/v1/integrations/github/user/callback"),
+		GitHubAppTokenEncryptionKey: os.Getenv("FORGEFLOW_GITHUB_APP_TOKEN_ENCRYPTION_KEY"),
+		MetricsToken:                os.Getenv("FORGEFLOW_METRICS_TOKEN"),
+		AttachmentDir:               value("FORGEFLOW_ATTACHMENTS_DIR", "./data/attachments"),
+		AttachmentStorage:           value("FORGEFLOW_ATTACHMENT_STORAGE", "local"),
+		AttachmentS3Endpoint:        strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_ENDPOINT")),
+		AttachmentS3AccessKey:       strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_ACCESS_KEY")),
+		AttachmentS3SecretKey:       os.Getenv("FORGEFLOW_ATTACHMENT_S3_SECRET_KEY"),
+		AttachmentS3Region:          value("FORGEFLOW_ATTACHMENT_S3_REGION", "us-east-1"),
+		AttachmentS3Bucket:          strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_BUCKET")),
+		AttachmentS3Prefix:          strings.TrimSpace(os.Getenv("FORGEFLOW_ATTACHMENT_S3_PREFIX")),
+		AttachmentS3Secure:          os.Getenv("FORGEFLOW_ATTACHMENT_S3_SECURE") == "true",
+		OTELEndpoint:                strings.TrimSpace(os.Getenv("FORGEFLOW_OTEL_ENDPOINT")),
+		OTELServiceName:             value("FORGEFLOW_OTEL_SERVICE_NAME", "forgeflow-api"),
+		RunnerURL:                   strings.TrimRight(strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_URL")), "/"),
+		RunnerToken:                 os.Getenv("FORGEFLOW_RUNNER_TOKEN"),
+		RunnerWorkspaceRoot:         value("FORGEFLOW_RUNNER_WORKSPACE_ROOT", "/var/lib/forgeflow/workspaces"),
+		RunnerImage:                 value("FORGEFLOW_RUNNER_IMAGE", "forgeflow/agent-runner:1.0.0"),
+		RunnerCPULimit:              value("FORGEFLOW_RUNNER_CPU_LIMIT", "2"),
+		RunnerMemoryLimit:           value("FORGEFLOW_RUNNER_MEMORY_LIMIT", "2g"),
+		RunnerPidsLimit:             512,
+		RunnerNetworkMode:           value("FORGEFLOW_RUNNER_NETWORK_MODE", "none"),
+		RunnerDockerWorkspaceRoot:   strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT")),
+	}
+	if raw := strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_PIDS_LIMIT")); raw != "" {
+		pids, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || pids < 1 || pids > 4096 {
+			return Config{}, fmt.Errorf("FORGEFLOW_RUNNER_PIDS_LIMIT must be between 1 and 4096")
+		}
+		c.RunnerPidsLimit = pids
 	}
 	if raw := strings.TrimSpace(os.Getenv("FORGEFLOW_GITHUB_APP_ID")); raw != "" {
 		appID, err := strconv.ParseInt(raw, 10, 64)

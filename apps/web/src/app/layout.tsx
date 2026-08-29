@@ -14,7 +14,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   const locale = savedLocale === "en" || (savedLocale !== "vi" && process.env.NEXT_PUBLIC_FORGEFLOW_LOCALE === "en") ? "en" : "vi";
   const theme = parseThemePreference(cookieStore.get(THEME_PREFERENCE_KEY)?.value);
   return (
-    <html lang={locale} data-theme={theme}>
+    <html lang={locale} data-theme={theme} data-scroll-behavior="smooth">
       <body>{children}</body>
     </html>
   );

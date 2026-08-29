@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forgeflow/forgeflow/backend/internal/audit"
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
@@ -28,8 +29,31 @@ type fakeAppClient struct {
 
 type fakeHistoryClient struct {
 	*fakeAppClient
-	commits      []RemoteCommit
-	pullRequests []RemotePullRequest
+	commits         []RemoteCommit
+	pullRequests    []RemotePullRequest
+	commitsErr      error
+	pullRequestsErr error
+}
+
+type fakeUserAuthClient struct {
+	*fakeAppClient
+	credential UserAccessToken
+	refreshed  UserAccessToken
+	user       GitHubUser
+	refreshes  int
+}
+
+func (f *fakeUserAuthClient) ExchangeUserCode(context.Context, string, string, string) (UserAccessToken, error) {
+	return f.credential, nil
+}
+
+func (f *fakeUserAuthClient) RefreshUserToken(context.Context, string) (UserAccessToken, error) {
+	f.refreshes++
+	return f.refreshed, nil
+}
+
+func (f *fakeUserAuthClient) GitHubUser(context.Context, string) (GitHubUser, error) {
+	return f.user, nil
 }
 
 func (f *fakeAppClient) Installation(_ context.Context, installationID int64) (RemoteInstallation, error) {
@@ -48,11 +72,11 @@ func (f *fakeAppClient) CreateDraftPullRequest(_ context.Context, _ int64, _ str
 }
 
 func (f *fakeHistoryClient) RepositoryCommits(_ context.Context, _ int64, _, _ string) ([]RemoteCommit, error) {
-	return f.commits, nil
+	return f.commits, f.commitsErr
 }
 
 func (f *fakeHistoryClient) RepositoryPullRequests(_ context.Context, _ int64, _ string) ([]RemotePullRequest, error) {
-	return f.pullRequests, nil
+	return f.pullRequests, f.pullRequestsErr
 }
 
 func TestInstallationSyncAndRepositoryLinking(t *testing.T) {
@@ -111,7 +135,24 @@ func TestInstallationSyncAndRepositoryLinking(t *testing.T) {
 	}
 }
 
-func TestRepositoryContextFallsBackToGitHubHistory(t *testing.T) {
+func TestInstallationUpdateCallbackUsesExistingInstallationWithoutState(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if _, err := store.UpsertInstallation(ctx, "org-1", 42, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeAppClient{installations: map[int64]RemoteInstallation{42: {ID: 42, AppID: 123, AccountLogin: "acme"}}}
+	service := NewService(store, client, AppConfig{ID: 123, Slug: "forgeflow", PrivateKey: "test-key", CallbackURL: "https://forgeflow.test/callback"}, nil, nil, nil, nil)
+
+	if err := service.CompleteInstallation(ctx, "", 42, "update"); err != nil {
+		t.Fatalf("complete update callback: %v", err)
+	}
+	if err := service.CompleteInstallation(ctx, "", 99, "update"); !isCode(err, apperr.CodeUnauthorized) {
+		t.Fatalf("unknown update callback error = %v, want unauthorized", err)
+	}
+}
+
+func TestRepositoryContextUsesLiveGitHubHistory(t *testing.T) {
 	ctx := context.Background()
 	store := NewMemoryStore()
 	repository, err := store.UpsertRepository(ctx, "org-1", 42, 7, "acme/app", "main", "https://github.com/acme/app.git")
@@ -120,6 +161,9 @@ func TestRepositoryContextFallsBackToGitHubHistory(t *testing.T) {
 	}
 	if err := store.LinkRepository(ctx, "org-1", "project-1", repository.ID); err != nil {
 		t.Fatalf("link repository: %v", err)
+	}
+	if _, err := store.UpsertPullRequest(ctx, "org-1", repository.ID, PullRequest{Number: 1, Title: "stale webhook projection"}); err != nil {
+		t.Fatalf("seed stale pull request projection: %v", err)
 	}
 	client := &fakeHistoryClient{
 		fakeAppClient: &fakeAppClient{},
@@ -138,6 +182,36 @@ func TestRepositoryContextFallsBackToGitHubHistory(t *testing.T) {
 	}
 	if len(result.PullRequests) != 1 || result.PullRequests[0].Number != 19 {
 		t.Fatalf("pull requests = %#v, want GitHub history", result.PullRequests)
+	}
+}
+
+func TestRepositoryContextFallsBackWhenGitHubHistoryFails(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	repository, err := store.UpsertRepository(ctx, "org-1", 42, 7, "acme/app", "main", "https://github.com/acme/app.git")
+	if err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	if _, err := store.UpsertPullRequest(ctx, "org-1", repository.ID, PullRequest{Number: 1, Title: "stored pull request"}); err != nil {
+		t.Fatalf("seed pull request: %v", err)
+	}
+	if err := store.LinkRepository(ctx, "org-1", "project-1", repository.ID); err != nil {
+		t.Fatalf("link repository: %v", err)
+	}
+	client := &fakeHistoryClient{
+		fakeAppClient:   &fakeAppClient{},
+		commitsErr:      errors.New("commits unavailable"),
+		pullRequestsErr: errors.New("pull requests unavailable"),
+	}
+	service := NewService(store, client, AppConfig{}, nil, nil, nil, nil)
+	actor := identity.Actor{ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{identity.CapabilityRepositoryRead: true}}
+
+	result, err := service.RepositoryContext(ctx, actor, "project-1", repository.ID)
+	if err != nil {
+		t.Fatalf("repository context: %v", err)
+	}
+	if len(result.PullRequests) != 1 || result.PullRequests[0].Title != "stored pull request" {
+		t.Fatalf("pull requests = %#v, want stored fallback", result.PullRequests)
 	}
 }
 
@@ -175,6 +249,99 @@ func TestStartInstallationRequiresConfiguredAppAndPermission(t *testing.T) {
 	configured := NewService(NewMemoryStore(), nil, AppConfig{ID: 1, Slug: "forgeflow", PrivateKey: "key", CallbackURL: "https://forgeflow.test/callback"}, nil, nil, nil, nil)
 	if _, err := configured.StartInstallation(ctx, actor); !isCode(err, apperr.CodeForbidden) {
 		t.Fatalf("unauthorized start error = %v, want forbidden", err)
+	}
+}
+
+func TestGitHubUserAuthorizationIssuesScopedCloneCredential(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if _, err := store.UpsertInstallation(ctx, "org-1", 42, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := store.UpsertRepository(ctx, "org-1", 42, 7, "acme/private", "main", "https://github.com/acme/private.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LinkRepository(ctx, "org-1", "project-1", repository.ID); err != nil {
+		t.Fatal(err)
+	}
+	store.SetGitHubUserID("user-1", 1001)
+	client := &fakeUserAuthClient{
+		fakeAppClient: &fakeAppClient{},
+		credential:    UserAccessToken{AccessToken: "access-token", RefreshToken: "refresh-token", AccessTokenExpiresAt: time.Now().UTC().Add(time.Hour)},
+		user:          GitHubUser{ID: 1001, Login: "syphune"},
+	}
+	service := NewService(store, client, AppConfig{ClientID: "app-client", ClientSecret: "app-secret", UserCallbackURL: "https://forgeflow.test/api/v1/integrations/github/user/callback", TokenEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}, nil, nil, nil, nil)
+	actor := identity.Actor{Type: "human", ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{identity.CapabilityRepositoryRead: true}}
+
+	authorizationURL, err := service.StartUserAuthorization(ctx, actor)
+	if err != nil {
+		t.Fatalf("start user authorization: %v", err)
+	}
+	parsed, err := url.Parse(authorizationURL)
+	if err != nil || parsed.Query().Get("state") == "" || parsed.Query().Get("code_challenge") == "" {
+		t.Fatalf("authorization URL = %q", authorizationURL)
+	}
+	if err := service.CompleteUserAuthorization(ctx, parsed.Query().Get("state"), "code"); err != nil {
+		t.Fatalf("complete user authorization: %v", err)
+	}
+	credential, err := service.CloneCredential(ctx, actor, "project-1", repository.ID)
+	if err != nil {
+		t.Fatalf("clone credential: %v", err)
+	}
+	if credential.Token != "access-token" || credential.Username != "x-access-token" || credential.CloneURL != repository.CloneURL {
+		t.Fatalf("clone credential = %#v", credential)
+	}
+	stored, err := store.GetUserCredential(ctx, "user-1")
+	if err != nil || stored.EncryptedAccessToken == "access-token" || stored.EncryptedRefreshToken == "refresh-token" {
+		t.Fatalf("stored credential = %#v, err = %v", stored, err)
+	}
+	if err := service.CompleteUserAuthorization(ctx, parsed.Query().Get("state"), "code"); !isCode(err, apperr.CodeUnauthorized) {
+		t.Fatalf("replayed user authorization error = %v, want unauthorized", err)
+	}
+}
+
+func TestGitHubUserAuthorizationRefreshesExpiredCredential(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	if _, err := store.UpsertInstallation(ctx, "org-1", 42, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := store.UpsertRepository(ctx, "org-1", 42, 7, "acme/private", "main", "https://github.com/acme/private.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LinkRepository(ctx, "org-1", "project-1", repository.ID); err != nil {
+		t.Fatal(err)
+	}
+	store.SetGitHubUserID("user-1", 1001)
+	client := &fakeUserAuthClient{
+		fakeAppClient: &fakeAppClient{},
+		credential:    UserAccessToken{AccessToken: "old-access", RefreshToken: "old-refresh", AccessTokenExpiresAt: time.Now().UTC().Add(-time.Minute)},
+		refreshed:     UserAccessToken{AccessToken: "new-access", RefreshToken: "new-refresh", AccessTokenExpiresAt: time.Now().UTC().Add(time.Hour)},
+		user:          GitHubUser{ID: 1001, Login: "syphune"},
+	}
+	service := NewService(store, client, AppConfig{ClientID: "app-client", ClientSecret: "app-secret", UserCallbackURL: "https://forgeflow.test/callback", TokenEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}, nil, nil, nil, nil)
+	actor := identity.Actor{Type: "human", ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{identity.CapabilityRepositoryRead: true}}
+	authorizationURL, err := service.StartUserAuthorization(ctx, actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, _ := url.Parse(authorizationURL)
+	if err := service.CompleteUserAuthorization(ctx, parsed.Query().Get("state"), "code"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.GetUserCredential(ctx, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.AccessTokenExpiresAt = time.Now().UTC().Add(-time.Minute)
+	if err := store.UpsertUserCredential(ctx, "user-1", stored); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := service.CloneCredential(ctx, actor, "project-1", repository.ID)
+	if err != nil || credential.Token != "new-access" || client.refreshes != 1 {
+		t.Fatalf("refreshed credential = %#v, refreshes = %d, err = %v", credential, client.refreshes, err)
 	}
 }
 

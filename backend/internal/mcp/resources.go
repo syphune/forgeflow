@@ -14,6 +14,21 @@ import (
 )
 
 func RegisterResources(server *sdk.Server, adapter *ServiceAdapter) {
+	server.AddResource(&sdk.Resource{
+		URI:         AgentSkillResourceURI,
+		Name:        "forgeflow-agent-skill",
+		Description: "Server-managed Forgeflow workflow for planning, specification, execution, verification, and handoff.",
+		MIMEType:    "text/markdown",
+	}, func(_ context.Context, request *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
+		if request == nil || request.Params == nil || request.Params.URI != AgentSkillResourceURI {
+			uri := AgentSkillResourceURI
+			if request != nil && request.Params != nil && request.Params.URI != "" {
+				uri = request.Params.URI
+			}
+			return nil, sdk.ResourceNotFoundError(uri)
+		}
+		return &sdk.ReadResourceResult{Contents: []*sdk.ResourceContents{{URI: AgentSkillResourceURI, MIMEType: "text/markdown", Text: agentSkillText}}}, nil
+	})
 	handler := func(ctx context.Context, request *sdk.ReadResourceRequest) (*sdk.ReadResourceResult, error) {
 		return adapter.readResource(ctx, request.Params.URI)
 	}
@@ -24,16 +39,22 @@ func RegisterResources(server *sdk.Server, adapter *ServiceAdapter) {
 		URITemplate: "task://{project_key}/{number}",
 	}, handler)
 	server.AddResourceTemplate(&sdk.ResourceTemplate{
+		Name:        "sprint-context",
+		Description: "Sprint or iteration brief and its authorized work items.",
+		MIMEType:    "application/json",
+		URITemplate: "sprint://{sprint_id}?project_id={project_id}",
+	}, handler)
+	server.AddResourceTemplate(&sdk.ResourceTemplate{
 		Name:        "repository-context",
 		Description: "Authorized repository architecture, conventions, testing, and issue context.",
 		MIMEType:    "application/json",
-		URITemplate: "repo://{repository_id}/{topic}",
+		URITemplate: "repo://{repository_id}/{topic}?project_id={project_id}",
 	}, handler)
 	server.AddResourceTemplate(&sdk.ResourceTemplate{
 		Name:        "repository-module",
 		Description: "A bounded untrusted file from an authorized repository.",
 		MIMEType:    "text/plain",
-		URITemplate: "repo://{repository_id}/module/{path}",
+		URITemplate: "repo://{repository_id}/module/{path}?project_id={project_id}",
 	}, handler)
 }
 
@@ -45,6 +66,8 @@ func (a *ServiceAdapter) readResource(ctx context.Context, rawURI string) (*sdk.
 	switch u.Scheme {
 	case "task":
 		return a.readTaskResource(ctx, rawURI, u)
+	case "sprint":
+		return a.readSprintResource(ctx, rawURI, u)
 	case "repo":
 		return a.readRepositoryResource(ctx, rawURI, u)
 	default:
@@ -52,10 +75,37 @@ func (a *ServiceAdapter) readResource(ctx context.Context, rawURI string) (*sdk.
 	}
 }
 
-func (a *ServiceAdapter) readTaskResource(ctx context.Context, rawURI string, u *url.URL) (*sdk.ReadResourceResult, error) {
-	if a.WorkItems == nil || strings.TrimSpace(a.ProjectID) == "" {
+func (a *ServiceAdapter) readSprintResource(ctx context.Context, rawURI string, u *url.URL) (*sdk.ReadResourceResult, error) {
+	if a.Planning == nil || strings.TrimSpace(u.Host) == "" {
 		return nil, sdk.ResourceNotFoundError(rawURI)
 	}
+	projectID := strings.TrimSpace(a.ProjectID)
+	if projectID == "" {
+		projectID = strings.TrimSpace(u.Query().Get("project_id"))
+	}
+	if projectID == "" {
+		return nil, sdk.ResourceNotFoundError(rawURI)
+	}
+	value, err := a.Call(ctx, "sprint.get_context", map[string]any{"project_id": projectID, "id": u.Host, "cursor": u.Query().Get("cursor")})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResource(rawURI, value)
+}
+
+func (a *ServiceAdapter) readTaskResource(ctx context.Context, rawURI string, u *url.URL) (*sdk.ReadResourceResult, error) {
+	if a.WorkItems == nil || strings.TrimSpace(u.Host) == "" {
+		return nil, sdk.ResourceNotFoundError(rawURI)
+	}
+	projectID := strings.TrimSpace(a.ProjectID)
+	if projectID == "" {
+		var err error
+		projectID, err = a.projectIDForKey(ctx, u.Host)
+		if err != nil {
+			return nil, sdk.ResourceNotFoundError(rawURI)
+		}
+	}
+	actor := a.Actor.ForProject(projectID)
 	number, err := strconv.ParseInt(strings.Trim(u.Path, "/"), 10, 64)
 	if err != nil || number < 1 || strings.TrimSpace(u.Host) == "" {
 		return nil, sdk.ResourceNotFoundError(rawURI)
@@ -63,13 +113,13 @@ func (a *ServiceAdapter) readTaskResource(ctx context.Context, rawURI string, u 
 	key := strings.ToUpper(strings.TrimSpace(u.Host)) + "-" + strconv.FormatInt(number, 10)
 	var cursor string
 	for pageNumber := 0; pageNumber < 100; pageNumber++ {
-		page, listErr := a.WorkItems.ListPage(ctx, workitem.Scope{OrganizationID: a.Actor.OrganizationID, ProjectID: a.ProjectID}, a.Actor, workitem.ListFilter{Limit: 100, Cursor: cursor})
+		page, listErr := a.WorkItems.ListPage(ctx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: projectID}, actor, workitem.ListFilter{Limit: 100, Cursor: cursor})
 		if listErr != nil {
 			return nil, listErr
 		}
 		for _, item := range page.Items {
 			if strings.EqualFold(item.Key, key) {
-				value, callErr := a.Call(ctx, "work_item.get_context", map[string]any{"id": item.ID})
+				value, callErr := a.Call(ctx, "work_item.get_context", map[string]any{"id": item.ID, "project_id": projectID})
 				if callErr != nil {
 					return nil, callErr
 				}
@@ -85,21 +135,21 @@ func (a *ServiceAdapter) readTaskResource(ctx context.Context, rawURI string, u 
 }
 
 func (a *ServiceAdapter) readRepositoryResource(ctx context.Context, rawURI string, u *url.URL) (*sdk.ReadResourceResult, error) {
-	if a.GitHub == nil || strings.TrimSpace(a.ProjectID) == "" {
+	if a.GitHub == nil {
 		return nil, sdk.ResourceNotFoundError(rawURI)
 	}
+	projectID := strings.TrimSpace(a.ProjectID)
+	if projectID == "" {
+		projectID = strings.TrimSpace(u.Query().Get("project_id"))
+	}
+	if projectID == "" {
+		return nil, sdk.ResourceNotFoundError(rawURI)
+	}
+	actor := a.Actor.ForProject(projectID)
 	repositoryID := strings.TrimSpace(u.Host)
 	pathParts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if repositoryID == "" || len(pathParts) == 0 || pathParts[0] == "" {
 		return nil, sdk.ResourceNotFoundError(rawURI)
-	}
-	var snapshot *githubintegration.SnapshotRecord
-	if a.GitHub.SnapshotService() != nil {
-		if item, ok, err := a.latestSnapshot(ctx, a.ProjectID, repositoryID); err != nil {
-			return nil, err
-		} else if ok {
-			snapshot = &item
-		}
 	}
 	if pathParts[0] == "module" {
 		if len(pathParts) < 2 {
@@ -109,26 +159,16 @@ func (a *ServiceAdapter) readRepositoryResource(ctx context.Context, rawURI stri
 		if err != nil {
 			return nil, sdk.ResourceNotFoundError(rawURI)
 		}
-		var content string
-		var fileErr error
-		if snapshot != nil {
-			var file githubintegration.SnapshotFile
-			file, fileErr = a.GitHub.SnapshotService().File(ctx, a.Actor, a.ProjectID, repositoryID, snapshot.ID, filePath)
-			content = file.Content
-		} else {
-			var file githubintegration.RepositoryFile
-			file, fileErr = a.GitHub.RepositoryFile(ctx, a.Actor, a.ProjectID, repositoryID, filePath)
-			content = file.Content
-		}
+		file, fileErr := a.GitHub.RepositoryFile(ctx, actor, projectID, repositoryID, filePath)
 		if fileErr != nil {
 			return nil, fileErr
 		}
-		return &sdk.ReadResourceResult{Contents: []*sdk.ResourceContents{{URI: rawURI, MIMEType: "text/plain", Text: content}}}, nil
+		return &sdk.ReadResourceResult{Contents: []*sdk.ResourceContents{{URI: rawURI, MIMEType: "text/plain", Text: file.Content}}}, nil
 	}
 	if len(pathParts) != 1 || !allowedResourceTopic(pathParts[0]) {
 		return nil, sdk.ResourceNotFoundError(rawURI)
 	}
-	repositoryContext, err := a.GitHub.RepositoryContext(ctx, a.Actor, a.ProjectID, repositoryID)
+	repositoryContext, err := a.GitHub.RepositoryContext(ctx, actor, projectID, repositoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,14 +179,13 @@ func (a *ServiceAdapter) readRepositoryResource(ctx context.Context, rawURI stri
 		"commits":       repositoryContext.Commits,
 		"pull_requests": repositoryContext.PullRequests,
 		"ci_runs":       repositoryContext.CIRuns,
+		"source":        "github",
+		"ref":           repositoryContext.Repository.DefaultBranch,
 		"content_trust": "UNTRUSTED_CONTENT",
-	}
-	if snapshot != nil {
-		value["fixed_snapshot"] = snapshot
 	}
 	if snapshots := a.GitHub.SnapshotService(); snapshots != nil {
 		if knowledge := snapshots.KnowledgeService(); knowledge != nil {
-			documents, knowledgeErr := knowledge.List(ctx, a.Actor, a.ProjectID, repositoryID, 50)
+			documents, knowledgeErr := knowledge.List(ctx, actor, projectID, repositoryID, 50)
 			if knowledgeErr != nil {
 				return nil, knowledgeErr
 			}

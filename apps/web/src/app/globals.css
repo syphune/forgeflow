@@ -3684,6 +3684,7 @@ textarea::placeholder {
   flex-direction: column;
   height: 100vh;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   padding: 22px 14px 16px;
 }
@@ -3708,6 +3709,7 @@ textarea::placeholder {
   display: grid;
   gap: 10px;
   margin: 24px 0 14px;
+  min-width: 0;
   padding: 0 4px 18px;
 }
 .app-v2-context-hint {
@@ -3743,7 +3745,45 @@ textarea::placeholder {
 }
 .app-v2-context-picker .app-v2-select,
 .app-v2-dialog .app-v2-select {
+  min-width: 0;
   width: 100%;
+}
+.app-v2-context-field,
+.app-v2-select-trigger,
+.app-v2-select-option {
+  min-width: 0;
+}
+.app-v2-project-picker-row {
+  align-items: stretch;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.app-v2-project-picker-row .app-v2-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+.app-v2-add-project {
+  align-items: center;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--amber);
+  display: inline-flex;
+  flex: 0 0 42px;
+  font-size: 22px;
+  font-weight: 500;
+  justify-content: center;
+  line-height: 1;
+  min-height: 42px;
+  text-decoration: none;
+}
+.app-v2-add-project:hover,
+.app-v2-add-project:focus-visible {
+  background: var(--surface-soft);
+  border-color: var(--amber);
+  color: var(--ink);
 }
 .app-v2-context-picker select:focus,
 .app-v2-toolbar select:focus,
@@ -3819,9 +3859,43 @@ textarea::placeholder {
   min-width: 0;
   padding: 9px 10px;
 }
-.app-v2-account-label {
+.app-v2-account-identity {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  min-width: 0;
+}
+.app-v2-account-avatar {
+  align-items: center;
+  background: var(--amber);
+  border-radius: 50%;
+  color: var(--accent-ink);
+  display: inline-flex;
+  flex: 0 0 30px;
+  font-size: 13px;
+  font-weight: 700;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+.app-v2-account-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.app-v2-account-name {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-v2-account-login,
+.app-v2-account-status {
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: 10px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3837,6 +3911,7 @@ textarea::placeholder {
   background: transparent;
   border: 0;
   cursor: pointer;
+  flex: 0 0 auto;
   padding: 0;
 }
 .app-v2-sign-out:disabled {
@@ -3850,6 +3925,13 @@ textarea::placeholder {
   font-size: 10px;
   gap: 5px;
   padding: 8px 10px 0;
+}
+.app-v2-sidebar-preferences {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 8px 0;
 }
 .app-v2-locale-switcher span {
   margin-right: auto;
@@ -3870,7 +3952,7 @@ textarea::placeholder {
   color: var(--ink);
 }
 .app-v2-theme-switcher {
-  justify-self: end;
+  margin-left: auto;
   font-size: 10px;
   padding: 8px 10px 0;
 }
@@ -3981,8 +4063,10 @@ textarea::placeholder {
   margin: 0 auto;
   max-width: 1440px;
   min-height: 0;
+  min-width: 0;
   overflow: auto;
   padding: 34px;
+  width: 100%;
 }
 .app-v2-page-heading {
   align-items: flex-end;
@@ -4120,7 +4204,9 @@ textarea::placeholder {
 .app-v2-board {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  grid-auto-columns: minmax(220px, 1fr);
+  grid-auto-flow: column;
+  grid-template-columns: none;
   overflow-x: auto;
 }
 .app-v2-column {
@@ -4169,7 +4255,8 @@ textarea::placeholder {
   border-color: var(--mint);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--mint) 16%, transparent);
 }
-.app-v2-sr-only {
+.app-v2-sr-only,
+.sr-only {
   height: 1px;
   margin: -1px;
   overflow: hidden;
@@ -4310,6 +4397,7 @@ textarea::placeholder {
 .app-v2-detail {
   margin: 0 auto;
   max-width: 1100px;
+  min-width: 0;
 }
 .app-v2-detail.is-modal {
   padding: 28px;
@@ -4382,11 +4470,13 @@ textarea::placeholder {
   display: grid;
   gap: 16px;
   grid-template-columns: minmax(0, 1fr) 240px;
+  min-width: 0;
 }
 .app-v2-detail-main,
 .app-v2-detail-stack {
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 .app-v2-surface-card {
   padding: 20px;
@@ -4841,6 +4931,8 @@ textarea::placeholder {
   opacity: 0.55;
 }
 .app-v2-select-trigger > span:first-child {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4866,7 +4958,8 @@ textarea::placeholder {
   box-shadow: 0 16px 34px color-mix(in srgb, var(--shadow-base) 34%, transparent);
   left: 0;
   max-height: 310px;
-  min-width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
   padding: 6px;
   position: absolute;
@@ -4924,6 +5017,7 @@ textarea::placeholder {
   color: var(--mint);
 }
 .app-v2-select-option > span:first-child {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5253,6 +5347,26 @@ textarea::placeholder {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .app-v2-form-grid .app-v2-dialog-field:nth-child(2) { grid-column: 1 / -1; }
+.app-v2-branch-plan-summary {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 16px 0;
+}
+.app-v2-branch-plan-summary > div {
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+}
+.app-v2-branch-plan-summary span,
+.app-v2-branch-plan-summary strong { display: block; }
+.app-v2-branch-plan-summary span {
+  color: var(--ink-dim);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.app-v2-branch-plan-summary strong {
+  overflow-wrap: anywhere;
+}
 .app-v2-settings-tabs {
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -5322,18 +5436,23 @@ textarea::placeholder {
 .app-v2-workflow-step strong { font-size: 13px; }
 .app-v2-workflow-strip {
   align-items: flex-start;
-  display: grid;
+  display: flex;
   gap: 0;
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-  margin: 4px 0 18px;
+  margin: 4px 0 14px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 2px 0;
 }
 .app-v2-workflow-strip-step {
   color: var(--ink-dim);
   display: grid;
-  gap: 6px;
-  min-width: 0;
+  gap: 4px;
+  flex: 1 0 100px;
+  grid-template-rows: 20px auto auto;
+  min-width: 100px;
   position: relative;
   text-align: center;
+  transition: color 180ms ease, opacity 180ms ease;
 }
 .app-v2-workflow-strip-step::before {
   background: var(--line);
@@ -5342,18 +5461,19 @@ textarea::placeholder {
   left: 0;
   position: absolute;
   right: 0;
-  top: 6px;
+  top: 10px;
 }
 .app-v2-workflow-strip-step:first-child::before { left: 50%; }
 .app-v2-workflow-strip-step:last-child::before { right: 50%; }
 .app-v2-workflow-strip-step span {
+  align-self: center;
   background: var(--surface-raised);
   border: 2px solid var(--line-strong);
   border-radius: 50%;
-  height: 14px;
+  height: 12px;
   justify-self: center;
   position: relative;
-  width: 14px;
+  width: 12px;
   z-index: 1;
 }
 .app-v2-workflow-strip-step strong {
@@ -5366,13 +5486,6 @@ textarea::placeholder {
 }
 .app-v2-workflow-strip-step.is-complete,
 .app-v2-workflow-strip-step.is-current { color: var(--ink); }
-.app-v2-workflow-strip-step.is-complete span,
-.app-v2-workflow-strip-step.is-current span {
-  background: var(--amber);
-  border-color: var(--amber);
-}
-.app-v2-workflow-strip-step.is-complete::before { background: var(--amber); }
-.app-v2-workflow-strip-step.is-current strong { color: var(--amber-bright); }
 .app-v2-settings-card { display: grid; gap: 16px; }
 .app-v2-transition-list,
 .app-v2-member-list,
@@ -5621,12 +5734,13 @@ textarea::placeholder {
   margin-left: 8px;
 }
 @media (max-width: 900px) {
-  .app-v2-board { grid-template-columns: repeat(2, minmax(240px, 1fr)); }
+  .app-v2-board { grid-auto-columns: minmax(240px, 1fr); }
   .app-v2-detail-grid { grid-template-columns: 1fr; }
   .app-v2-repository-layout { grid-template-columns: 1fr; }
   .app-v2-repository-context { position: static; }
   .app-v2-editor-field-columns { grid-template-columns: 1fr; }
   .app-v2-editor-repeater-row { grid-template-columns: 1fr; }
+  .app-v2-branch-plan-summary { grid-template-columns: 1fr; }
   .app-v2-settings-table-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-v2-settings-table-row .app-v2-checkbox { grid-column: 1 / -1; }
   .app-v2-settings-create-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -5671,11 +5785,47 @@ textarea::placeholder {
   .app-v2-view-toggle { width: 100%; }
   .app-v2-view-toggle button { flex: 1; }
   .app-v2-list-row { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .app-v2-board { grid-template-columns: minmax(250px, 1fr); }
+  .app-v2-board { grid-auto-columns: minmax(250px, 1fr); }
   .app-v2-detail.is-modal { padding: 22px 16px; }
   .app-v2-modal { border-radius: 0; }
   .app-v2-detail-heading { flex-direction: column; }
   .app-v2-detail-actions { padding-top: 0; }
+  .app-v2-tabs { flex-wrap: wrap; overflow-x: visible; }
+  .app-v2-tabs button { flex: 1 1 auto; min-height: 40px; white-space: nowrap; }
+  .app-v2-settings-tabs { flex-wrap: wrap; overflow-x: visible; }
+  .app-v2-settings-tabs a { flex: 1 1 auto; min-height: 40px; text-align: center; }
+  .app-v2-transition-control { align-items: stretch; }
+  .app-v2-transition-control .app-v2-select,
+  .app-v2-transition-control > .button { flex: 1 1 100%; min-width: 0; width: 100%; }
+  .app-v2-workflow-strip {
+    display: grid;
+    gap: var(--space-2) var(--space-3);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
+  }
+  .app-v2-workflow-strip-step {
+    align-items: center;
+    display: flex;
+    flex: initial;
+    gap: var(--space-2);
+    min-width: 0;
+    text-align: left;
+  }
+  .app-v2-workflow-strip-step::before { display: none; }
+  .app-v2-workflow-strip-step strong { white-space: normal; }
+  .app-v2-workflow-strip-step.is-current {
+    display: grid;
+    gap: var(--space-2);
+    grid-template-columns: 18px minmax(0, 1fr);
+  }
+  .app-v2-workflow-strip-step.is-current strong {
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .app-v2-workflow-strip-step.is-current .app-v2-workflow-current-label {
+    grid-column: 2;
+    justify-self: start;
+  }
   .app-v2-responsibility-grid { grid-template-columns: 1fr; }
   .app-v2-notification { align-items: flex-start; flex-direction: column; }
   .app-v2-context-loader { align-items: stretch; flex-direction: column; }
@@ -6101,6 +6251,62 @@ textarea::placeholder {
 .app-v2-workflow-strip-step.is-success::before { background: var(--mint); }
 .app-v2-workflow-strip-step.is-warning::before { background: var(--amber); }
 .app-v2-workflow-strip-step.is-danger::before { background: var(--rose); }
+.app-v2-workflow-strip-step.is-upcoming { color: var(--ink-dim); opacity: 0.62; }
+.app-v2-workflow-strip-step.is-upcoming span { background: var(--surface-raised); border-color: var(--line-strong); }
+.app-v2-workflow-strip-step.is-upcoming::before { background: var(--line); }
+.app-v2-workflow-strip-step.is-current {
+  color: var(--ink);
+  margin: 0;
+  padding: 0;
+}
+.app-v2-workflow-strip-step.is-current::before { background: var(--line); }
+.app-v2-workflow-strip-step.is-complete span {
+  background: var(--mint);
+  border-color: var(--mint);
+}
+.app-v2-workflow-strip-step.is-complete span::after {
+  color: var(--accent-ink);
+  content: "✓";
+  font-size: 8px;
+  font-weight: 800;
+  left: 50%;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -55%);
+}
+.app-v2-workflow-strip-step.is-complete::before { background: var(--mint); }
+.app-v2-workflow-strip-step.is-current span {
+  background: var(--amber);
+  border-color: var(--amber);
+  animation: app-v2-workflow-current-pulse 2.8s ease-in-out infinite;
+  box-shadow: 0 0 0 3px var(--status-warning-bg);
+  height: 18px;
+  width: 18px;
+}
+.app-v2-workflow-strip-step.is-current strong {
+  color: var(--amber-bright);
+  font-weight: 800;
+  padding: 0 4px;
+}
+.app-v2-workflow-current-label {
+  background: var(--status-warning-bg);
+  border: 1px solid var(--status-warning-border);
+  border-radius: 999px;
+  color: var(--amber-bright);
+  display: inline-flex;
+  font-size: 8px;
+  font-weight: 700;
+  justify-self: center;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+@keyframes app-v2-workflow-current-pulse {
+  0%,
+  100% { box-shadow: 0 0 0 3px var(--status-warning-bg), 0 0 0 0 color-mix(in srgb, var(--amber) 0%, transparent); }
+  50% { box-shadow: 0 0 0 3px var(--status-warning-bg), 0 0 10px 2px color-mix(in srgb, var(--amber) 32%, transparent); }
+}
 .app-v2-sprint-status {
   align-items: center;
   border: 1px solid var(--line);
@@ -6166,10 +6372,10 @@ textarea::placeholder {
 .app-v2-nav,
 .app-v2-sidebar-bottom { gap: var(--space-1); }
 .app-v2-nav a,
-.app-v2-sidebar-bottom a { gap: var(--space-3); padding: var(--space-3); }
+.app-v2-sidebar-bottom a { gap: var(--space-3); padding: var(--space-2) var(--space-3); }
 .app-v2-account { gap: var(--space-2); margin-bottom: var(--space-2); padding: var(--space-3); }
 .app-v2-locale-switcher,
-.app-v2-theme-switcher { gap: var(--space-1); padding-top: var(--space-3); }
+.app-v2-theme-switcher { gap: var(--space-1); padding: 0; }
 .app-v2-home-grid { gap: var(--space-3); margin-top: var(--space-6); }
 .app-v2-home-card { gap: var(--space-6); padding: var(--space-5); }
 .app-v2-home-card h3,

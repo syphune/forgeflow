@@ -14,6 +14,7 @@ const allCapabilities = [
   "sprint.manage",
   "repository.read",
   "repository.manage",
+  "branch.manage",
   "specification.propose",
   "specification.verify",
   "agent.execute",
@@ -33,6 +34,7 @@ const roleCapabilities: Record<string, readonly string[]> = {
     "agent.execute",
     "agent.approve",
     "project.manage",
+    "branch.manage",
   ],
   developer: [
     "work_item.create",
@@ -40,6 +42,7 @@ const roleCapabilities: Record<string, readonly string[]> = {
     "work_item.assign",
     "work_item.transition",
     "agent.execute",
+    "branch.manage",
   ],
   qa: ["work_item.edit", "work_item.transition", "specification.verify"],
   viewer: [],

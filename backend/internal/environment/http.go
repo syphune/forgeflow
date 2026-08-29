@@ -23,6 +23,8 @@ func NewHandler(service *Service, maxBody int64) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /projects/{id}/ai-policy", h.getPolicy)
 	mux.HandleFunc("PUT /projects/{id}/ai-policy", h.setPolicy)
+	mux.HandleFunc("GET /projects/{id}/delivery-policy", h.getDeliveryPolicy)
+	mux.HandleFunc("PUT /projects/{id}/delivery-policy", h.setDeliveryPolicy)
 	mux.HandleFunc("GET /projects/{id}/environments", h.list)
 	mux.HandleFunc("POST /projects/{id}/environments", h.create)
 	return mux
@@ -34,6 +36,7 @@ func NewDeploymentHandler(service *Service, maxBody int64) http.Handler {
 	mux.HandleFunc("POST /deployments", h.createDeployment)
 	mux.HandleFunc("GET /deployments/{id}", h.getDeployment)
 	mux.HandleFunc("POST /deployments/{id}/approve", h.approveDeployment)
+	mux.HandleFunc("POST /deployments/{id}/verify", h.verifyDeployment)
 	mux.HandleFunc("POST /deployments/{id}/status", h.updateDeployment)
 	return mux
 }
@@ -66,6 +69,39 @@ func (h *Handler) setPolicy(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.SetPolicy(r.Context(), actor, r.PathValue("id"), policy)
 	if err != nil {
 		writeError(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) getDeliveryPolicy(w http.ResponseWriter, r *http.Request) {
+	actor, err := actorFrom(r)
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	policy, err := h.service.GetDeliveryPolicy(r.Context(), actor, r.PathValue("id"))
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusOK, policy)
+}
+
+func (h *Handler) setDeliveryPolicy(w http.ResponseWriter, r *http.Request) {
+	actor, err := actorFrom(r)
+	if err != nil {
+		sendError(w, r, err)
+		return
+	}
+	var policy DeliveryPolicy
+	if err := decode(w, r, h.maxBody, &policy); err != nil {
+		sendError(w, r, err)
+		return
+	}
+	result, err := h.service.SetDeliveryPolicy(r.Context(), actor, r.PathValue("id"), policy)
+	if err != nil {
+		sendError(w, r, err)
 		return
 	}
 	httpapi.JSON(w, http.StatusOK, result)
@@ -168,6 +204,25 @@ func (h *Handler) approveDeployment(w http.ResponseWriter, r *http.Request) {
 	httpapi.JSON(w, http.StatusOK, item)
 }
 
+func (h *Handler) verifyDeployment(w http.ResponseWriter, r *http.Request) {
+	actor, err := actorFrom(r)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	projectID, err := scopedProjectID(r)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	item, err := h.service.VerifyDeployment(r.Context(), actor, projectID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusOK, item)
+}
+
 func (h *Handler) updateDeployment(w http.ResponseWriter, r *http.Request) {
 	actor, err := actorFrom(r)
 	if err != nil {
@@ -225,3 +280,5 @@ func decode(w http.ResponseWriter, r *http.Request, maxBody int64, target any) e
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, err error) { httpapi.Error(w, r, err) }
+
+func sendError(w http.ResponseWriter, r *http.Request, err error) { httpapi.Error(w, r, err) }

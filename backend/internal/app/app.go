@@ -13,6 +13,7 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/automation"
 	"github.com/forgeflow/forgeflow/backend/internal/autonomous"
 	"github.com/forgeflow/forgeflow/backend/internal/board"
+	"github.com/forgeflow/forgeflow/backend/internal/branchplan"
 	"github.com/forgeflow/forgeflow/backend/internal/customfield"
 	"github.com/forgeflow/forgeflow/backend/internal/environment"
 	"github.com/forgeflow/forgeflow/backend/internal/github"
@@ -45,6 +46,9 @@ type App struct {
 	Notifications   *notification.Service
 	CustomFields    *customfield.Service
 	Attachments     *attachment.Service
+	Tenant          *tenant.Service
+	Planning        *planning.Service
+	BranchPlans     *branchplan.Service
 	GitHub          *github.Service
 	RepositoryIndex *github.SnapshotService
 	Authenticator   identity.Authenticator
@@ -61,6 +65,7 @@ func New(maxBodyBytes int64) *App {
 	workflowService := workflow.NewService(workflow.Default())
 	workflowService.SetRecorder(workflow.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, now)
 	workItemService := workitem.NewService(workItemRepository, specService, workflowService, auditWriter, outboxWriter, now)
+	specService.SetWorkItemStateReader(workItemService)
 	planningService := planning.NewService(planning.NewMemoryStore(), planning.Options{Recorder: planning.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}})
 	agentRunService := agentrun.NewService(agentrun.NewMemoryStore(), workItemService, agentrun.Options{Recorder: agentrun.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Now: now})
 	environmentService := environment.NewService(environment.NewMemoryStore(), environment.Options{Recorder: environment.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Now: now})
@@ -71,6 +76,9 @@ func New(maxBodyBytes int64) *App {
 	snapshotService := github.NewSnapshotService(integrationService, github.NewMemorySnapshotStore())
 	snapshotService.SetKnowledgeService(github.NewKnowledgeService(integrationService, github.NewMemoryKnowledgeStore()))
 	integrationService.SetSnapshotService(snapshotService)
+	branchPlanService := branchplan.NewService(branchplan.NewMemoryStore(now), nil, branchplan.Options{Recorder: branchplan.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Now: now})
+	workItemService.SetBranchPlanPreparer(branchPlanService)
+	autonomousService.SetBranchPlans(branchPlanService)
 	tenantStore := tenant.NewMemoryStore()
 	notificationStore := notification.NewMemoryStore(func(ctx context.Context, organizationID, projectID string) ([]string, error) {
 		members, err := tenantStore.ListMembers(ctx, organizationID, projectID)
@@ -87,10 +95,18 @@ func New(maxBodyBytes int64) *App {
 	automationService := automation.NewService(automation.NewMemoryStore(), notificationStore, automation.Options{Recorder: automation.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}})
 	customFieldService := customfield.NewService(customfield.NewMemoryStore(), customfield.Options{Recorder: customfield.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}})
 	attachmentService := attachment.NewService(attachment.NewMemoryStore(), attachment.NewMemoryBlobStore(), now, attachment.Options{Recorder: attachment.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}})
+	tenantService := tenant.NewService(tenantStore, tenant.Options{Recorder: tenant.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}})
+	evidence := &engineeringEvidenceAdapter{store: githubStore, tenants: tenantService, delivery: environmentService}
+	environmentService.SetReleaseApprovalEvidence(evidence)
+	workItemService.SetEngineeringEvidence(evidence)
+	workItemService.SetDeliveryPolicyProvider(evidence)
+	workItemService.SetQAEvidence(agentRunService)
+	workItemService.SetDeploymentEvidence(environmentService)
 	specService.SetMediaReferenceValidator(attachmentService)
 	ready := func(context.Context) error { return nil }
 	idempotencyStore := platformidempotency.NewMemoryStore()
-	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandler(nil, nil, maxBodyBytes), tenant.NewHandler(tenant.NewService(tenantStore, tenant.Options{Recorder: tenant.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}}), maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandler(workItemService, workflowService), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(github.NewMemoryWebhookStore(), "", maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, "/", idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, maxBodyBytes, integrationService), nil, true, maxBodyBytes, ready, idempotencyStore), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, GitHub: integrationService, RepositoryIndex: snapshotService, Close: func() error { return nil }}
+	branchPlanHandler := branchplan.NewHandler(branchPlanService, workItemService, maxBodyBytes)
+	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandler(nil, nil, maxBodyBytes), tenant.NewHandler(tenantService, maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandlerWithProjectSettings(workItemService, workflowService, tenantService, now), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(github.NewMemoryWebhookStore(), "", maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, "/", idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), branchPlanHandler, mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, tenantService, planningService, maxBodyBytes, integrationService), nil, true, maxBodyBytes, ready, idempotencyStore, tenantService), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, Tenant: tenantService, Planning: planningService, BranchPlans: branchPlanService, GitHub: integrationService, RepositoryIndex: snapshotService, Close: func() error { return nil }}
 }
 
 func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64, developmentAuth bool, oauthConfig auth.OAuthConfig, githubWebhookSecret string, attachmentConfig attachment.StorageConfig, githubAppConfigs ...github.AppConfig) (*App, error) {
@@ -110,6 +126,7 @@ func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64
 	workflowService.SetRecorder(workflow.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, now)
 	githubStore := github.NewPostgresStore(pool)
 	workItemService := workitem.NewService(workitem.NewPostgresRepository(pool), specService, workflowService, auditWriter, outboxWriter, now, db.NewTransactionRunner(pool))
+	specService.SetWorkItemStateReader(workItemService)
 	workItemService.SetEngineeringEvidence(githubStore)
 	planningService := planning.NewService(planning.NewPostgresStore(pool), planning.Options{Recorder: planning.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool)})
 	agentRunStore := agentrun.NewPostgresStore(pool)
@@ -129,6 +146,9 @@ func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64
 		return nil, err
 	}
 	integrationService := github.NewService(githubStore, githubClient, githubAppConfig, auditWriter, outboxWriter, now, db.NewTransactionRunner(pool))
+	branchPlanService := branchplan.NewService(branchplan.NewPostgresStore(pool), branchPlanProvider{github: integrationService}, branchplan.Options{Recorder: branchplan.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool), Now: now})
+	workItemService.SetBranchPlanPreparer(branchPlanService)
+	autonomousService.SetBranchPlans(branchPlanService)
 	snapshotService := github.NewSnapshotService(integrationService, github.NewPostgresSnapshotStore(pool))
 	snapshotService.SetKnowledgeService(github.NewKnowledgeService(integrationService, github.NewPostgresKnowledgeStore(pool)))
 	integrationService.SetSnapshotService(snapshotService)
@@ -136,6 +156,12 @@ func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64
 	notificationService := notification.NewService(notificationStore)
 	automationService := automation.NewService(automation.NewPostgresStore(pool), notificationStore, automation.Options{Recorder: automation.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool), Now: now})
 	customFieldService := customfield.NewService(customfield.NewPostgresStore(pool), customfield.Options{Recorder: customfield.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool), Now: now})
+	tenantService := tenant.NewService(tenant.NewPostgresStore(pool), tenant.Options{Recorder: tenant.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool)})
+	evidence := &engineeringEvidenceAdapter{store: githubStore, tenants: tenantService, delivery: environmentService}
+	workItemService.SetEngineeringEvidence(evidence)
+	workItemService.SetDeliveryPolicyProvider(evidence)
+	workItemService.SetQAEvidence(agentRunService)
+	workItemService.SetDeploymentEvidence(environmentService)
 	blobStore, err := attachment.NewBlobStore(attachmentConfig)
 	if err != nil {
 		pool.Close()
@@ -146,15 +172,17 @@ func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64
 	ready := func(readyCtx context.Context) error { return db.Ready(readyCtx, pool) }
 	webhookStore := github.NewPostgresWebhookStore(pool, outboxWriter)
 	webhookStore.SetAgentRunProjector(agentRunStore)
+	webhookStore.SetBranchPlanProjector(branchPlanService)
 	idempotencyStore := platformidempotency.NewPostgresStore(pool)
-	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandlerWithOAuth(tokenStore, tokenStore, oauthHandler, maxBodyBytes), tenant.NewHandler(tenant.NewService(tenant.NewPostgresStore(pool), tenant.Options{Recorder: tenant.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool)}), maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandler(workItemService, workflowService), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(webhookStore, githubWebhookSecret, maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, oauthConfig.SuccessRedirect, idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, maxBodyBytes, integrationService), authenticator, developmentAuth, maxBodyBytes, ready, idempotencyStore), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, GitHub: integrationService, RepositoryIndex: snapshotService, Authenticator: authenticator, Close: func() error { pool.Close(); return nil }}, nil
+	branchPlanHandler := branchplan.NewHandler(branchPlanService, workItemService, maxBodyBytes)
+	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandlerWithOAuth(tokenStore, tokenStore, oauthHandler, maxBodyBytes), tenant.NewHandler(tenantService, maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandlerWithProjectSettings(workItemService, workflowService, tenantService, now), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(webhookStore, githubWebhookSecret, maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, oauthConfig.SuccessRedirect, idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), branchPlanHandler, mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, tenantService, planningService, maxBodyBytes, integrationService), authenticator, developmentAuth, maxBodyBytes, ready, idempotencyStore, tenantService), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, Tenant: tenantService, Planning: planningService, BranchPlans: branchPlanService, GitHub: integrationService, RepositoryIndex: snapshotService, Authenticator: authenticator, Close: func() error { pool.Close(); return nil }}, nil
 }
 
-func composeHandler(workItems *workitem.Service, specs *specification.Service, workflowService *workflow.Service, authHandler, tenantHandler, planningHandler, boardHandler, agentRunHandler, autonomousHandler, environmentHandler, deploymentHandler, webhookHandler, integrationHandler, automationHandler, notificationHandler, customFieldHandler, attachmentHandler, auditHandler, activityHandler, mcpHandler http.Handler, authenticator identity.Authenticator, developmentAuth bool, maxBodyBytes int64, ready func(context.Context) error, idempotencyStore platformidempotency.Store) http.Handler {
+func composeHandler(workItems *workitem.Service, specs *specification.Service, workflowService *workflow.Service, authHandler, tenantHandler, planningHandler, boardHandler, agentRunHandler, autonomousHandler, environmentHandler, deploymentHandler, webhookHandler, integrationHandler, automationHandler, notificationHandler, customFieldHandler, attachmentHandler, auditHandler, activityHandler, branchPlanHandler, mcpHandler http.Handler, authenticator identity.Authenticator, developmentAuth bool, maxBodyBytes int64, ready func(context.Context) error, idempotencyStore platformidempotency.Store, projectScopeLookup workitem.ProjectScopeLookup) http.Handler {
 	api := http.NewServeMux()
-	workItemAPI := workitem.NewAPIHandler(workItems, specs, maxBodyBytes, idempotencyStore)
+	workItemAPI := workitem.NewAPIHandlerWithProjectScopeLookup(workItems, specs, maxBodyBytes, idempotencyStore, projectScopeLookup)
 	api.Handle("/work-items", workItemAPI)
-	api.Handle("/work-items/", workItemRoutes(workItemAPI, activityHandler, customFieldHandler, attachmentHandler))
+	api.Handle("/work-items/", workItemRoutes(workItemAPI, activityHandler, customFieldHandler, attachmentHandler, branchPlanHandler))
 	api.Handle("/me", authHandler)
 	api.Handle("/me/", authHandler)
 	api.Handle("/auth/", authHandler)
@@ -163,7 +191,7 @@ func composeHandler(workItems *workitem.Service, specs *specification.Service, w
 	api.Handle("/workspaces", tenantHandler)
 	api.Handle("/workspaces/", tenantHandler)
 	api.Handle("/projects", tenantHandler)
-	api.Handle("/projects/", projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler))
+	api.Handle("/projects/", projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler, branchPlanHandler))
 	api.Handle("/sprints", planningHandler)
 	api.Handle("/sprints/", planningHandler)
 	api.Handle("/boards/", boardHandler)
@@ -206,9 +234,9 @@ func composeHandler(workItems *workitem.Service, specs *specification.Service, w
 	return httpapi.WithSecurityHeaders(httpapi.WithRequestID(root))
 }
 
-func projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler http.Handler) http.Handler {
+func projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler, branchPlanHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/ai-policy") || strings.Contains(r.URL.Path, "/environments") {
+		if strings.Contains(r.URL.Path, "/ai-policy") || strings.Contains(r.URL.Path, "/delivery-policy") || strings.Contains(r.URL.Path, "/environments") {
 			environmentHandler.ServeHTTP(w, r)
 			return
 		}
@@ -224,11 +252,15 @@ func projectRoutes(tenantHandler, integrationHandler, automationHandler, customF
 			automationHandler.ServeHTTP(w, r)
 			return
 		}
+		if strings.Contains(r.URL.Path, "/branch-policy") {
+			branchPlanHandler.ServeHTTP(w, r)
+			return
+		}
 		tenantHandler.ServeHTTP(w, r)
 	})
 }
 
-func workItemRoutes(workItemHandler, activityHandler, customFieldHandler, attachmentHandler http.Handler) http.Handler {
+func workItemRoutes(workItemHandler, activityHandler, customFieldHandler, attachmentHandler, branchPlanHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/activity") {
 			activityHandler.ServeHTTP(w, r)
@@ -240,6 +272,10 @@ func workItemRoutes(workItemHandler, activityHandler, customFieldHandler, attach
 		}
 		if strings.Contains(r.URL.Path, "/custom-fields") {
 			customFieldHandler.ServeHTTP(w, r)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/branch-plan") {
+			branchPlanHandler.ServeHTTP(w, r)
 			return
 		}
 		workItemHandler.ServeHTTP(w, r)

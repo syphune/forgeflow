@@ -1,9 +1,11 @@
 package board
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/httpapi"
@@ -13,8 +15,14 @@ import (
 )
 
 type Handler struct {
-	workItems *workitem.Service
-	workflow  *workflow.Service
+	workItems       *workitem.Service
+	workflow        *workflow.Service
+	projectSettings ProjectSettings
+	now             func() time.Time
+}
+
+type ProjectSettings interface {
+	ProjectBoardVisibilityDays(context.Context, identity.Actor, string) (int, error)
 }
 
 func NewHandler(workItems *workitem.Service, workflowServices ...*workflow.Service) http.Handler {
@@ -22,7 +30,21 @@ func NewHandler(workItems *workitem.Service, workflowServices ...*workflow.Servi
 	if len(workflowServices) > 0 && workflowServices[0] != nil {
 		workflowService = workflowServices[0]
 	}
-	h := &Handler{workItems: workItems, workflow: workflowService}
+	return newHandler(workItems, workflowService, nil, func() time.Time { return time.Now().UTC() })
+}
+
+func NewHandlerWithProjectSettings(workItems *workitem.Service, workflowService *workflow.Service, settings ProjectSettings, now func() time.Time) http.Handler {
+	if workflowService == nil {
+		workflowService = workflow.NewService(workflow.Default())
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	return newHandler(workItems, workflowService, settings, now)
+}
+
+func newHandler(workItems *workitem.Service, workflowService *workflow.Service, settings ProjectSettings, now func() time.Time) http.Handler {
+	h := &Handler{workItems: workItems, workflow: workflowService, projectSettings: settings, now: now}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boards/current", h.current)
 	return mux
@@ -40,11 +62,25 @@ func (h *Handler) current(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: projectID}
+	doneVisibilityDays := 0
+	if h.projectSettings != nil {
+		var settingsErr error
+		doneVisibilityDays, settingsErr = h.projectSettings.ProjectBoardVisibilityDays(r.Context(), actor, projectID)
+		if settingsErr != nil {
+			httpapi.Error(w, r, settingsErr)
+			return
+		}
+	}
+	var completedBefore *time.Time
+	if doneVisibilityDays > 0 {
+		cutoff := h.now().UTC().Add(-time.Duration(doneVisibilityDays) * 24 * time.Hour)
+		completedBefore = &cutoff
+	}
 	items := make([]*workitem.WorkItem, 0)
 	cursor := ""
 	truncated := false
 	for pageNumber := 0; pageNumber < 20; pageNumber++ {
-		page, err := h.workItems.ListPage(r.Context(), scope, actor, workitem.ListFilter{Limit: 100, Cursor: cursor, Sort: "backlog"})
+		page, err := h.workItems.ListPage(r.Context(), scope, actor, workitem.ListFilter{Limit: 100, Cursor: cursor, Sort: "backlog", ExcludeTerminalCompletedBefore: completedBefore})
 		if err != nil {
 			httpapi.Error(w, r, err)
 			return
@@ -93,5 +129,5 @@ func (h *Handler) current(w http.ResponseWriter, r *http.Request) {
 		}
 		columns = append(columns, map[string]any{"status": status.Key, "name": status.Name, "position": status.Position, "ordering_version": orderingVersion, "items": columnItems})
 	}
-	httpapi.JSON(w, 200, map[string]any{"project_id": projectID, "columns": columns, "truncated": truncated})
+	httpapi.JSON(w, 200, map[string]any{"project_id": projectID, "columns": columns, "truncated": truncated, "done_visibility_days": doneVisibilityDays})
 }

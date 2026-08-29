@@ -40,10 +40,14 @@ func newIntegrationHandler(service *Service, maxBody int64, successRedirect stri
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /integrations/github/install/start", h.startInstallation)
 	mux.HandleFunc("GET /integrations/github/install/callback", h.completeInstallation)
+	mux.HandleFunc("GET /integrations/github/user/start", h.startUserAuthorization)
+	mux.HandleFunc("GET /integrations/github/user/callback", h.completeUserAuthorization)
 	mux.HandleFunc("GET /integrations/github/installations", h.listInstallations)
 	mux.HandleFunc("GET /integrations/github/repositories", h.listRepositories)
 	mux.HandleFunc("GET /projects/{id}/repositories", h.listProjectRepositories)
+	mux.HandleFunc("GET /projects/{id}/repositories/{repository_id}/clone-credential", h.cloneCredential)
 	mux.HandleFunc("GET /projects/{id}/repositories/{repository_id}/context", h.repositoryContext)
+	mux.HandleFunc("POST /projects/{id}/repositories/{repository_id}/initialize", h.initializeRepository)
 	mux.HandleFunc("POST /projects/{id}/repositories/{repository_id}/pull-requests", h.createDraftPullRequest)
 	mux.HandleFunc("GET /projects/{id}/repositories/{repository_id}/tree", h.repositoryTree)
 	mux.HandleFunc("GET /projects/{id}/repositories/{repository_id}/file", h.repositoryFile)
@@ -78,6 +82,67 @@ func (h *IntegrationHandler) repositoryContext(w http.ResponseWriter, r *http.Re
 		return
 	}
 	httpapi.JSON(w, http.StatusOK, item)
+}
+
+func (h *IntegrationHandler) initializeRepository(w http.ResponseWriter, r *http.Request) {
+	actor, err := currentActor(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	claimed := false
+	if h.idempotency != nil {
+		if key == "" {
+			httpapi.Error(w, r, apperr.New(apperr.CodeInvalidArgument, http.StatusUnprocessableEntity, "Idempotency-Key is required for repository initialization", nil))
+			return
+		}
+		claim, claimErr := h.idempotency.Claim(r.Context(), actor.OrganizationID, actor.ID, key)
+		if claimErr == platformidempotency.ErrInProgress {
+			httpapi.Error(w, r, apperr.New(apperr.CodeConflict, http.StatusConflict, "idempotency key is already in progress", nil))
+			return
+		}
+		if claimErr != nil {
+			httpapi.Error(w, r, apperr.New(apperr.CodeInvalidArgument, http.StatusUnprocessableEntity, "idempotency key is invalid or expired", nil))
+			return
+		}
+		if claim.Replay {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(claim.Status)
+			_, _ = w.Write(claim.ResponseBody)
+			return
+		}
+		claimed = true
+	}
+	item, err := h.service.InitializeRepository(r.Context(), actor, r.PathValue("id"), r.PathValue("repository_id"))
+	if err != nil {
+		if claimed {
+			_ = h.idempotency.Release(r.Context(), actor.OrganizationID, actor.ID, key)
+		}
+		httpapi.Error(w, r, err)
+		return
+	}
+	body, marshalErr := json.Marshal(item)
+	if marshalErr != nil {
+		if claimed {
+			_ = h.idempotency.Release(r.Context(), actor.OrganizationID, actor.ID, key)
+		}
+		httpapi.Error(w, r, apperr.New(apperr.CodeInternal, http.StatusInternalServerError, "could not encode repository initialization response", nil))
+		return
+	}
+	if claimed {
+		if err := h.idempotency.Complete(r.Context(), actor.OrganizationID, actor.ID, key, http.StatusCreated, body); err != nil {
+			httpapi.Error(w, r, apperr.New(apperr.CodeInternal, http.StatusInternalServerError, "could not persist idempotency response", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(body)
+		return
+	}
+	httpapi.JSON(w, http.StatusCreated, item)
 }
 
 type draftPullRequestRequest struct {
@@ -276,6 +341,42 @@ func (h *IntegrationHandler) listInstallations(w http.ResponseWriter, r *http.Re
 	httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (h *IntegrationHandler) startUserAuthorization(w http.ResponseWriter, r *http.Request) {
+	actor, err := currentActor(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	location, err := h.service.StartUserAuthorization(r.Context(), actor)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	http.Redirect(w, r, location, http.StatusFound)
+}
+
+func (h *IntegrationHandler) completeUserAuthorization(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(r.URL.Query().Get("error")) != "" {
+		httpapi.Error(w, r, apperr.New(apperr.CodeUnauthorized, 401, "GitHub code authorization was denied", nil))
+		return
+	}
+	if err := h.service.CompleteUserAuthorization(r.Context(), r.URL.Query().Get("state"), r.URL.Query().Get("code")); err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	redirect := h.successRedirect
+	if strings.TrimSpace(redirect) == "" {
+		redirect = "/"
+	}
+	if parsed, parseErr := url.Parse(redirect); parseErr == nil {
+		query := parsed.Query()
+		query.Set("github_code", "connected")
+		parsed.RawQuery = query.Encode()
+		redirect = parsed.String()
+	}
+	http.Redirect(w, r, redirect, http.StatusFound)
+}
+
 func (h *IntegrationHandler) listProjectRepositories(w http.ResponseWriter, r *http.Request) {
 	actor, err := currentActor(r)
 	if err != nil {
@@ -288,6 +389,22 @@ func (h *IntegrationHandler) listProjectRepositories(w http.ResponseWriter, r *h
 		return
 	}
 	httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *IntegrationHandler) cloneCredential(w http.ResponseWriter, r *http.Request) {
+	actor, err := currentActor(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	credential, err := h.service.CloneCredential(r.Context(), actor, r.PathValue("id"), r.PathValue("repository_id"))
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	httpapi.JSON(w, http.StatusOK, credential)
 }
 
 type repositoryLinkRequest struct {

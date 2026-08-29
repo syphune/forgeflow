@@ -48,13 +48,18 @@ func newHandler(h *Handler) http.Handler {
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
-	actor, err := currentActor(r)
+	actor, err := authenticatedActor(r)
 	if err != nil {
 		httpapi.Error(w, r, err)
 		return
 	}
+	var organizationID any = actor.OrganizationID
+	if strings.TrimSpace(actor.OrganizationID) == "" {
+		organizationID = nil
+	}
 	httpapi.JSON(w, http.StatusOK, map[string]any{
-		"id": actor.ID, "type": actor.Type, "organization_id": actor.OrganizationID,
+		"id": actor.ID, "type": actor.Type, "organization_id": organizationID,
+		"login": actor.Login, "display_name": actor.DisplayName,
 		"source": actor.Source,
 	})
 }
@@ -155,8 +160,19 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func currentActor(r *http.Request) (identity.Actor, error) {
+	actor, err := authenticatedActor(r)
+	if err != nil {
+		return identity.Actor{}, err
+	}
+	if strings.TrimSpace(actor.OrganizationID) == "" {
+		return identity.Actor{}, apperr.New(apperr.CodeUnauthorized, 401, "authenticated organization is required", nil)
+	}
+	return actor, nil
+}
+
+func authenticatedActor(r *http.Request) (identity.Actor, error) {
 	actor, ok := identity.ActorFromContext(r.Context())
-	if !ok || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.OrganizationID) == "" {
+	if !ok || strings.TrimSpace(actor.ID) == "" {
 		return identity.Actor{}, apperr.New(apperr.CodeUnauthorized, 401, "authenticated actor is required", nil)
 	}
 	return actor, nil
@@ -165,7 +181,7 @@ func currentActor(r *http.Request) (identity.Actor, error) {
 var allowedScopes = map[string]bool{
 	"organization.read": true, "organization.manage": true, "workspace.read": true, "workspace.manage": true, "project.read": true, "project.manage": true,
 	"work_item.create": true, "work_item.edit": true, "work_item.assign": true,
-	"work_item.transition": true, "work_item.delete": true, "comment.create": true, "sprint.manage": true, "repository.read": true, "repository.manage": true,
+	"work_item.transition": true, "work_item.delete": true, "comment.create": true, "sprint.manage": true, "repository.read": true, "repository.manage": true, "branch.manage": true,
 	"specification.propose": true, "specification.verify": true, "agent.execute": true,
 	"autonomous.start": true, "autonomous.retry": true, "autonomous.cancel": true,
 	"agent.approve": true, "audit.read": true,

@@ -35,7 +35,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	encoder := json.NewEncoder(os.Stdout)
-	executor := runner.Executor{}
+	executor := runner.Executor{UseDocker: true, DockerWorkspaceRoot: strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT"))}
 	_, err := executor.Execute(ctx, job, func(event runner.Event) error {
 		return encoder.Encode(event)
 	})
@@ -49,6 +49,29 @@ func serveHTTP(address, token string, logger *slog.Logger) {
 	if token == "" {
 		logger.Error("FORGEFLOW_RUNNER_TOKEN is required for HTTP runner mode")
 		os.Exit(2)
+	}
+	handler := runnerHTTPHandler(token, nil)
+	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 24 * time.Hour}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	logger.Info("runner listening", "address", address)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("runner stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runnerHTTPHandler(token string, execute func(context.Context, runner.Job) (runner.Result, error)) http.Handler {
+	if execute == nil {
+		execute = func(ctx context.Context, job runner.Job) (runner.Result, error) {
+			return (runner.Executor{UseDocker: true, DockerWorkspaceRoot: strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT"))}).Execute(ctx, job, nil)
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -66,7 +89,8 @@ func serveHTTP(address, token string, logger *slog.Logger) {
 			http.Error(w, "invalid job", http.StatusBadRequest)
 			return
 		}
-		result, err := (runner.Executor{}).Execute(r.Context(), job, nil)
+		job.GitToken = strings.TrimSpace(r.Header.Get("X-Forgeflow-Git-Token"))
+		result, err := execute(r.Context(), job)
 		status := http.StatusOK
 		if err != nil {
 			status = http.StatusUnprocessableEntity
@@ -75,20 +99,7 @@ func serveHTTP(address, token string, logger *slog.Logger) {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(result)
 	})
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 24 * time.Hour}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	logger.Info("runner listening", "address", address)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("runner stopped", "error", err)
-		os.Exit(1)
-	}
+	return mux
 }
 
 func authorizedRunnerRequest(r *http.Request, expected string) bool {

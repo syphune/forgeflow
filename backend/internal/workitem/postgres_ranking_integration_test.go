@@ -91,4 +91,28 @@ func TestPostgresBacklogRankingRoundTrip(t *testing.T) {
 	if moved.Item.Status != workflow.Refining || moved.SourceOrderingVersion != versions[workflow.Raw]+1 || moved.DestinationOrderingVersion != 2 {
 		t.Fatalf("atomic cross-column move = %#v", moved)
 	}
+
+	current, err = repository.Get(ctx, scope, created[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions, err = repository.ColumnOrderingVersions(ctx, scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Now().UTC().Truncate(time.Second).Add(-48 * time.Hour)
+	moved, err = repository.Move(ctx, scope, MoveInput{
+		ItemID:                             current.ID,
+		TargetStatus:                       workflow.Cancelled,
+		ExpectedVersion:                    current.Version,
+		ExpectedSourceOrderingVersion:      versions[workflow.Raw],
+		ExpectedDestinationOrderingVersion: 1,
+		CompletedAt:                        &completedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.Item.CompletedAt == nil || !moved.Item.CompletedAt.Equal(completedAt) {
+		t.Fatalf("terminal move completed_at = %v, want %v", moved.Item.CompletedAt, completedAt)
+	}
 }

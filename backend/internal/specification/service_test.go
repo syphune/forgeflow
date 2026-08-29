@@ -9,6 +9,7 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
+	"github.com/forgeflow/forgeflow/backend/internal/workflow"
 )
 
 func TestBugReadinessRequiresHumanVerifiedEvidence(t *testing.T) {
@@ -331,6 +332,69 @@ func TestSpecificationMutationsRecordAuditAndOutbox(t *testing.T) {
 	if len(auditWriter.Records()) != 2 || len(outboxWriter.Events()) != 2 {
 		t.Fatalf("audit/events = %d/%d, want 2/2", len(auditWriter.Records()), len(outboxWriter.Events()))
 	}
+}
+
+func TestSpecificationMutationsRespectWorkItemState(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	state := &workItemStateStub{status: workflow.Raw}
+	s := NewService(store, func() time.Time { return time.Unix(100, 0).UTC() }, Options{WorkItemStateReader: state})
+	if _, err := s.Ensure(ctx, "org-1", "project-1", "item-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	summary := "draft"
+	if _, err := s.Update(ctx, "org-1", "project-1", "item-1", "human", UpdateInput{Summary: &summary}); err == nil || apperr.From(err).Code != apperr.CodeConflict {
+		t.Fatalf("raw update error = %v, want conflict", err)
+	}
+
+	spec, err := s.Get(ctx, "org-1", "project-1", "item-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.RegressionCases = []RegressionTestCase{{Position: 1, Scenario: "Submit the form", ExpectedResult: "A success message is shown"}}
+	if err := store.Save(ctx, "org-1", "project-1", spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.VerifyRegression(ctx, "org-1", "project-1", "item-1", 1, "human", "user-1"); err == nil || apperr.From(err).Code != apperr.CodeConflict {
+		t.Fatalf("raw verification error = %v, want conflict", err)
+	}
+
+	state.status = workflow.Refining
+	if _, err := s.Update(ctx, "org-1", "project-1", "item-1", "human", UpdateInput{Summary: &summary}); err != nil {
+		t.Fatalf("refining update: %v", err)
+	}
+	if err := s.VerifyRegression(ctx, "org-1", "project-1", "item-1", 1, "human", "user-1"); err != nil {
+		t.Fatalf("refining verification: %v", err)
+	}
+	spec, err = s.Get(ctx, "org-1", "project-1", "item-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := identity.Actor{Type: "human", ID: "reviewer-1", Capabilities: map[string]bool{identity.CapabilitySpecificationVerify: true}}
+	if _, err := s.Review(ctx, "org-1", "project-1", "item-1", reviewer, ReviewInput{ExpectedVersion: spec.Version}); err == nil || apperr.From(err).Code != apperr.CodeConflict {
+		t.Fatalf("refining review error = %v, want conflict", err)
+	}
+
+	state.status = workflow.ReviewRequired
+	if _, err := s.Review(ctx, "org-1", "project-1", "item-1", reviewer, ReviewInput{ExpectedVersion: spec.Version}); err != nil {
+		t.Fatalf("review-required review: %v", err)
+	}
+}
+
+type workItemStateStub struct {
+	status string
+}
+
+func (s *workItemStateStub) WorkItemState(context.Context, string, string, string) (WorkItemState, error) {
+	phase := SpecificationPhaseRefining
+	switch s.status {
+	case workflow.Raw:
+		phase = SpecificationPhaseRaw
+	case workflow.ReviewRequired:
+		phase = SpecificationPhaseReview
+	}
+	return WorkItemState{Status: s.status, SpecificationPhase: phase}, nil
 }
 
 func contains(values []string, want string) bool {

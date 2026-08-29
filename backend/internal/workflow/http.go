@@ -29,6 +29,7 @@ func NewHandler(service *Service, maxBodies ...int64) http.Handler {
 	mux.HandleFunc("GET /workflows/current/statuses", h.statuses)
 	mux.HandleFunc("GET /workflows/current/transitions", h.transitions)
 	mux.HandleFunc("PUT /workflows/current", h.save)
+	mux.HandleFunc("POST /workflows/current/templates/release-gated", h.releaseGated)
 	return mux
 }
 
@@ -111,6 +112,20 @@ func (h *Handler) save(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpapi.JSON(w, http.StatusOK, workflowResponse(workflow))
+}
+
+func (h *Handler) releaseGated(w http.ResponseWriter, r *http.Request) {
+	actor, err := h.actorForMutation(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	result, err := h.service.SaveForProject(r.Context(), actor, r.Header.Get("X-Project-ID"), ReleaseGatedInput())
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusOK, workflowResponse(result))
 }
 
 func (h *Handler) actorForMutation(r *http.Request) (identity.Actor, error) {

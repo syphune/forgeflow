@@ -10,9 +10,11 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/agentrun"
 	"github.com/forgeflow/forgeflow/backend/internal/autonomous"
 	githubintegration "github.com/forgeflow/forgeflow/backend/internal/github"
+	"github.com/forgeflow/forgeflow/backend/internal/planning"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
 	"github.com/forgeflow/forgeflow/backend/internal/specification"
+	"github.com/forgeflow/forgeflow/backend/internal/tenant"
 	"github.com/forgeflow/forgeflow/backend/internal/workitem"
 )
 
@@ -20,6 +22,8 @@ type ServiceAdapter struct {
 	Actor      identity.Actor
 	WorkItems  *workitem.Service
 	Spec       *specification.Service
+	Tenant     *tenant.Service
+	Planning   *planning.Service
 	AgentRuns  *agentrun.Service
 	Autonomous *autonomous.Service
 	GitHub     *githubintegration.Service
@@ -30,15 +34,22 @@ func (a *ServiceAdapter) SetAutonomous(service *autonomous.Service) {
 	a.Autonomous = service
 }
 
-func NewServiceAdapter(actor identity.Actor, workItems *workitem.Service, spec *specification.Service, projectID string, agentRuns ...*agentrun.Service) *ServiceAdapter {
+func NewServiceAdapter(actor identity.Actor, workItems *workitem.Service, spec *specification.Service, tenantService *tenant.Service, planningService *planning.Service, projectID string, agentRuns ...*agentrun.Service) *ServiceAdapter {
 	var runs *agentrun.Service
 	if len(agentRuns) > 0 {
 		runs = agentRuns[0]
 	}
-	return &ServiceAdapter{Actor: actor, WorkItems: workItems, Spec: spec, AgentRuns: runs, ProjectID: projectID}
+	return &ServiceAdapter{Actor: actor, WorkItems: workItems, Spec: spec, Tenant: tenantService, Planning: planningService, AgentRuns: runs, ProjectID: projectID}
 }
 
-func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]any) (any, error) {
+func (a ServiceAdapter) Call(ctx context.Context, name string, args map[string]any) (any, error) {
+	if name == "project.list" {
+		if a.Tenant == nil {
+			return nil, apperr.New(apperr.CodeInternal, 503, "tenant adapter is unavailable", nil)
+		}
+		items, err := a.Tenant.Projects(ctx, a.Actor, stringArg(args, "workspace_id"))
+		return map[string]any{"items": items}, err
+	}
 	requestedProjectID := stringArg(args, "project_id")
 	projectID := a.ProjectID
 	if projectID == "" {
@@ -47,7 +58,32 @@ func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]
 		return nil, apperr.New(apperr.CodeForbidden, 403, "MCP project scope cannot be changed by a tool argument", map[string]any{"project_id": projectID})
 	}
 	if projectID == "" {
-		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "MCP project scope is required", nil)
+		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "project_id is required; call project.list and ask the user to choose one project before retrying", map[string]any{"requires_project_selection": true})
+	}
+	a.Actor = a.Actor.ForProject(projectID)
+	if name == "sprint.list" {
+		if a.Planning == nil {
+			return nil, apperr.New(apperr.CodeInternal, 503, "planning adapter is unavailable", nil)
+		}
+		items, err := a.Planning.List(ctx, a.Actor, projectID)
+		return map[string]any{"items": items}, err
+	}
+	if name == "sprint.get_context" {
+		if a.Planning == nil {
+			return nil, apperr.New(apperr.CodeInternal, 503, "planning adapter is unavailable", nil)
+		}
+		if a.WorkItems == nil {
+			return nil, apperr.New(apperr.CodeInternal, 503, "work-item adapter is unavailable", nil)
+		}
+		sprint, err := a.sprintByID(ctx, projectID, stringArg(args, "id"))
+		if err != nil {
+			return nil, err
+		}
+		page, err := a.WorkItems.ListPage(ctx, workitem.Scope{OrganizationID: a.Actor.OrganizationID, ProjectID: projectID}, a.Actor, workitem.ListFilter{SprintID: sprint.ID, Limit: 100, Cursor: stringArg(args, "cursor")})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"sprint_id": sprint.ID, "brief": sprint.Goal, "sprint": sprint, "work_items": page.Items, "next_cursor": page.NextCursor}, nil
 	}
 	scope := workitem.Scope{OrganizationID: a.Actor.OrganizationID, ProjectID: projectID}
 	if a.WorkItems == nil {
@@ -102,31 +138,28 @@ func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]
 				result["related_commits"] = context.Commits
 				result["related_pull_requests"] = context.PullRequests
 				result["related_ci_runs"] = context.CIRuns
+				result["repository_source"] = "github"
+				result["repository_ref"] = context.Repository.DefaultBranch
 				result["content_trust"] = "UNTRUSTED_CONTENT"
 				result["context_budget"] = map[string]any{"max_items": 50, "max_file_bytes": 262144, "max_total_bytes": 1048576}
+				query := strings.TrimSpace(item.Title)
+				if len(query) > 120 {
+					query = query[:120]
+				}
+				if query != "" {
+					files, searchErr := a.GitHub.SearchRepository(ctx, a.Actor, scope.ProjectID, repositoryID, query, 10)
+					if searchErr != nil {
+						return nil, searchErr
+					}
+					result["relevant_files"] = files
+				}
 				if snapshots := a.GitHub.SnapshotService(); snapshots != nil {
-					if snapshot, snapshotOK, snapshotErr := a.latestSnapshot(ctx, scope.ProjectID, repositoryID); snapshotErr != nil {
-						return nil, snapshotErr
-					} else if snapshotOK {
-						result["fixed_snapshot"] = snapshot
-						query := strings.TrimSpace(item.Title)
-						if len(query) > 120 {
-							query = query[:120]
+					if knowledge := snapshots.KnowledgeService(); knowledge != nil {
+						documents, knowledgeErr := knowledge.List(ctx, a.Actor, scope.ProjectID, repositoryID, 20)
+						if knowledgeErr != nil {
+							return nil, knowledgeErr
 						}
-						if query != "" {
-							files, searchErr := snapshots.Search(ctx, a.Actor, scope.ProjectID, repositoryID, snapshot.ID, query, 10)
-							if searchErr != nil {
-								return nil, searchErr
-							}
-							result["relevant_files"] = files
-						}
-						if knowledge := snapshots.KnowledgeService(); knowledge != nil {
-							documents, knowledgeErr := knowledge.List(ctx, a.Actor, scope.ProjectID, repositoryID, 20)
-							if knowledgeErr != nil {
-								return nil, knowledgeErr
-							}
-							result["knowledge_documents"] = documents
-						}
+						result["knowledge_documents"] = documents
 					}
 				}
 			}
@@ -138,7 +171,7 @@ func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]
 		if err != nil {
 			return nil, err
 		}
-		item, err := a.WorkItems.Create(ctx, scope, a.Actor, workitem.CreateInput{Type: itemType, Title: stringArg(args, "title"), Description: stringArg(args, "description"), ParentID: stringArg(args, "parent_id"), RepositoryID: stringArg(args, "repository_id"), Priority: stringArg(args, "priority"), DueAt: dueAt, EstimatePoints: intPtr(args, "estimate_points"), SprintID: stringArg(args, "sprint_id")})
+		item, err := a.WorkItems.Create(ctx, scope, a.Actor, workitem.CreateInput{Type: itemType, Title: stringArg(args, "title"), Description: stringArg(args, "description"), ParentID: stringArg(args, "parent_id"), RepositoryID: stringArg(args, "repository_id"), Priority: stringArg(args, "priority"), RiskLevel: workitem.RiskLevel(stringArg(args, "risk_level")), DueAt: dueAt, EstimatePoints: intPtr(args, "estimate_points"), SprintID: stringArg(args, "sprint_id")})
 		return item, err
 	case "work_item.update":
 		title := stringArgPtr(args, "title")
@@ -148,7 +181,8 @@ func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]
 			return nil, err
 		}
 		dueAtSet := args["due_at"] != nil
-		item, err := a.WorkItems.Update(ctx, scope, a.Actor, stringArg(args, "id"), workitem.UpdateInput{Title: title, Description: description, ParentID: stringArgPtr(args, "parent_id"), ParentIDSet: args["parent_id"] != nil, RepositoryID: stringArgPtr(args, "repository_id"), RepositoryIDSet: args["repository_id"] != nil, Priority: stringArgPtr(args, "priority"), DueAt: dueAt, DueAtSet: dueAtSet, EstimatePoints: intPtr(args, "estimate_points"), EstimatePointsSet: args["estimate_points"] != nil, SprintID: stringArgPtr(args, "sprint_id"), SprintIDSet: args["sprint_id"] != nil, ExpectedVersion: int64Arg(args, "expected_version")})
+		riskLevel := workitem.RiskLevel(strings.ToUpper(strings.TrimSpace(stringArg(args, "risk_level"))))
+		item, err := a.WorkItems.Update(ctx, scope, a.Actor, stringArg(args, "id"), workitem.UpdateInput{Title: title, Description: description, ParentID: stringArgPtr(args, "parent_id"), ParentIDSet: args["parent_id"] != nil, RepositoryID: stringArgPtr(args, "repository_id"), RepositoryIDSet: args["repository_id"] != nil, Priority: stringArgPtr(args, "priority"), RiskLevel: &riskLevel, RiskLevelSet: args["risk_level"] != nil, DueAt: dueAt, DueAtSet: dueAtSet, EstimatePoints: intPtr(args, "estimate_points"), EstimatePointsSet: args["estimate_points"] != nil, SprintID: stringArgPtr(args, "sprint_id"), SprintIDSet: args["sprint_id"] != nil, ExpectedVersion: int64Arg(args, "expected_version")})
 		return item, err
 	case "work_item.assign":
 		return a.WorkItems.Assign(ctx, scope, a.Actor, stringArg(args, "id"), stringArg(args, "assignee_id"), int64Arg(args, "expected_version"))
@@ -341,94 +375,49 @@ func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]
 			if err != nil {
 				return nil, err
 			}
-			return repositoryContext.Repository, nil
+			return map[string]any{"repository": repositoryContext.Repository, "branches": repositoryContext.Branches, "commits": repositoryContext.Commits, "pull_requests": repositoryContext.PullRequests, "ci_runs": repositoryContext.CIRuns, "source": "github"}, nil
 		case "repository.related_pull_requests":
 			repositoryContext, err := a.GitHub.RepositoryContext(ctx, a.Actor, scope.ProjectID, repositoryID)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"items": repositoryContext.PullRequests, "content_trust": "UNTRUSTED_CONTENT"}, nil
+			return map[string]any{"items": repositoryContext.PullRequests, "source": "github", "content_trust": "UNTRUSTED_CONTENT"}, nil
 		case "repository.related_commits":
 			repositoryContext, err := a.GitHub.RepositoryContext(ctx, a.Actor, scope.ProjectID, repositoryID)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"items": repositoryContext.Commits, "content_trust": "UNTRUSTED_CONTENT"}, nil
+			return map[string]any{"items": repositoryContext.Commits, "source": "github", "content_trust": "UNTRUSTED_CONTENT"}, nil
 		case "repository.get_structure":
 			tree, err := a.GitHub.RepositoryTree(ctx, a.Actor, scope.ProjectID, repositoryID)
 			if err != nil {
 				return nil, err
 			}
-			result := map[string]any{"items": tree, "index_status": "github_fixed_default_branch", "content_trust": "UNTRUSTED_CONTENT"}
-			if snapshot, ok, snapshotErr := a.latestSnapshot(ctx, scope.ProjectID, repositoryID); snapshotErr != nil {
-				return nil, snapshotErr
-			} else if ok {
-				result["snapshot"] = snapshot
-				result["index_status"] = "persisted_fixed_commit"
-			}
-			return result, nil
+			return map[string]any{"items": tree, "source": "github", "ref": "default_branch", "content_trust": "UNTRUSTED_CONTENT"}, nil
 		case "repository.search_code":
-			if snapshot, ok, snapshotErr := a.latestSnapshot(ctx, scope.ProjectID, repositoryID); snapshotErr != nil {
-				return nil, snapshotErr
-			} else if ok {
-				matches, searchErr := a.GitHub.SnapshotService().Search(ctx, a.Actor, scope.ProjectID, repositoryID, snapshot.ID, stringArg(args, "query"), intArg(args, "limit"))
-				if searchErr != nil {
-					return nil, searchErr
-				}
-				return map[string]any{"items": matches, "snapshot": snapshot, "content_trust": "UNTRUSTED_CONTENT"}, nil
-			}
 			matches, err := a.GitHub.SearchRepository(ctx, a.Actor, scope.ProjectID, repositoryID, stringArg(args, "query"), intArg(args, "limit"))
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"items": matches, "content_trust": "UNTRUSTED_CONTENT"}, nil
+			return map[string]any{"items": matches, "source": "github", "ref": "default_branch", "content_trust": "UNTRUSTED_CONTENT"}, nil
 		case "repository.get_file":
-			if snapshot, ok, snapshotErr := a.latestSnapshot(ctx, scope.ProjectID, repositoryID); snapshotErr != nil {
-				return nil, snapshotErr
-			} else if ok {
-				file, fileErr := a.GitHub.SnapshotService().File(ctx, a.Actor, scope.ProjectID, repositoryID, snapshot.ID, stringArg(args, "path"))
-				if fileErr != nil {
-					return nil, fileErr
-				}
-				return map[string]any{"file": file, "snapshot": snapshot, "content_trust": "UNTRUSTED_CONTENT"}, nil
-			}
 			file, err := a.GitHub.RepositoryFile(ctx, a.Actor, scope.ProjectID, repositoryID, stringArg(args, "path"))
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"file": file, "content_trust": "UNTRUSTED_CONTENT"}, nil
+			return map[string]any{"file": file, "source": "github", "ref": file.Ref, "content_trust": "UNTRUSTED_CONTENT"}, nil
 		case "repository.get_symbol":
-			if snapshot, ok, snapshotErr := a.latestSnapshot(ctx, scope.ProjectID, repositoryID); snapshotErr != nil {
-				return nil, snapshotErr
-			} else if ok {
-				matches, symbolErr := a.GitHub.SnapshotService().Symbols(ctx, a.Actor, scope.ProjectID, repositoryID, snapshot.ID, stringArg(args, "symbol"), intArg(args, "limit"))
-				if symbolErr != nil {
-					return nil, symbolErr
-				}
-				return map[string]any{"items": matches, "snapshot": snapshot, "match_type": "indexed_symbol", "provenance": "EXTRACTED", "content_trust": "UNTRUSTED_CONTENT"}, nil
-			}
 			matches, err := a.GitHub.SearchRepository(ctx, a.Actor, scope.ProjectID, repositoryID, stringArg(args, "symbol"), intArg(args, "limit"))
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"items": matches, "match_type": "lexical_candidate", "provenance": "EXTRACTED", "content_trust": "UNTRUSTED_CONTENT"}, nil
+			return map[string]any{"items": matches, "source": "github", "ref": "default_branch", "match_type": "lexical_candidate", "provenance": "EXTRACTED", "content_trust": "UNTRUSTED_CONTENT"}, nil
 		case "repository.related_files":
 			files, err := a.GitHub.RelatedRepositoryFiles(ctx, a.Actor, scope.ProjectID, repositoryID, stringArg(args, "path"), intArg(args, "limit"))
 			if err != nil {
 				return nil, err
 			}
-			result := map[string]any{"items": files, "content_trust": "UNTRUSTED_CONTENT"}
-			if snapshot, ok, snapshotErr := a.latestSnapshot(ctx, scope.ProjectID, repositoryID); snapshotErr != nil {
-				return nil, snapshotErr
-			} else if ok {
-				edges, edgeErr := a.GitHub.SnapshotService().Edges(ctx, a.Actor, scope.ProjectID, repositoryID, snapshot.ID, stringArg(args, "path"), intArg(args, "limit"))
-				if edgeErr != nil {
-					return nil, edgeErr
-				}
-				result["snapshot"] = snapshot
-				result["import_edges"] = edges
-			}
-			return result, nil
+			return map[string]any{"items": files, "source": "github", "ref": "default_branch", "content_trust": "UNTRUSTED_CONTENT"}, nil
 		default:
 			return nil, apperr.New(apperr.CodeInvalidArgument, 422, "repository tool is not implemented in this adapter", map[string]any{"tool": name})
 		}
@@ -437,18 +426,37 @@ func (a *ServiceAdapter) Call(ctx context.Context, name string, args map[string]
 	}
 }
 
-func (a *ServiceAdapter) latestSnapshot(ctx context.Context, projectID, repositoryID string) (githubintegration.SnapshotRecord, bool, error) {
-	if a.GitHub == nil || a.GitHub.SnapshotService() == nil {
-		return githubintegration.SnapshotRecord{}, false, nil
+func (a ServiceAdapter) projectIDForKey(ctx context.Context, key string) (string, error) {
+	if a.Tenant == nil {
+		return "", apperr.New(apperr.CodeInternal, 503, "tenant adapter is unavailable", nil)
 	}
-	items, err := a.GitHub.SnapshotService().List(ctx, a.Actor, projectID, repositoryID, 1)
+	items, err := a.Tenant.Projects(ctx, a.Actor, "")
 	if err != nil {
-		return githubintegration.SnapshotRecord{}, false, err
+		return "", err
 	}
-	if len(items) == 0 {
-		return githubintegration.SnapshotRecord{}, false, nil
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Key), strings.TrimSpace(key)) {
+			return item.ID, nil
+		}
 	}
-	return items[0], true, nil
+	return "", apperr.New(apperr.CodeNotFound, 404, "project not found", nil)
+}
+
+func (a ServiceAdapter) sprintByID(ctx context.Context, projectID, id string) (planning.Sprint, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return planning.Sprint{}, apperr.New(apperr.CodeInvalidArgument, 422, "id is required", nil)
+	}
+	items, err := a.Planning.List(ctx, a.Actor, projectID)
+	if err != nil {
+		return planning.Sprint{}, err
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return planning.Sprint{}, apperr.New(apperr.CodeNotFound, 404, "sprint not found", nil)
 }
 
 func stringArg(args map[string]any, key string) string {

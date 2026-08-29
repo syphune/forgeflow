@@ -31,10 +31,18 @@ type eventHandler struct {
 	repositories interface {
 		ListProjectRepositories(context.Context, string, string) ([]githubintegration.Repository, error)
 	}
+	credentials interface {
+		RunnerGitCredential(context.Context, identity.Actor, string, string) (githubintegration.CloneCredential, error)
+	}
 	agentRuns     *agentrun.Service
 	autonomous    *autonomous.Service
 	dispatcher    runner.Dispatcher
 	workspaceRoot string
+	runnerImage   string
+	runnerCPU     string
+	runnerMemory  string
+	runnerPids    int
+	runnerNetwork string
 }
 
 func (h eventHandler) Handle(ctx context.Context, event outbox.Event) error {
@@ -67,8 +75,7 @@ func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Ev
 		if strings.TrimSpace(workflowID) == "" {
 			return fmt.Errorf("autonomous AgentRun %s is missing workflow_id", run.ID)
 		}
-		_, err = h.autonomous.HandleAgentRunResult(ctx, actor, projectID, workflowID, runner.Result{Error: "autonomous runner is not configured"})
-		return err
+		return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "autonomous runner is not configured")
 	}
 	projectID, _ := event.Payload["project_id"].(string)
 	if strings.TrimSpace(projectID) == "" {
@@ -104,7 +111,26 @@ func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Ev
 	if root == "" {
 		root = "/var/lib/forgeflow/workspaces"
 	}
-	job := runner.Job{ID: run.ID, AutonomousRunID: workflowID, AgentRunID: run.ID, Provider: run.AgentProvider, Model: run.Model, Prompt: run.ExecutionInputs.Prompt, RepositoryURL: repository.CloneURL, BaseSHA: run.BaseSHA, Branch: run.Branch, WorkspaceRoot: root, Workspace: filepath.Join(root, run.ID), TimeoutSeconds: 3600, NetworkMode: "none", AllowedHosts: []string{"github.com"}, MCPPermissions: run.ExecutionInputs.MCPPermissions}
+	pushBranch, _ := run.ExecutionPolicy["push_branch"].(bool)
+	networkMode := h.runnerNetwork
+	if networkMode == "" {
+		networkMode = "none"
+	}
+	if pushBranch {
+		networkMode = "bridge"
+	}
+	var gitToken string
+	if pushBranch {
+		if h.credentials == nil {
+			return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "GitHub runner credential provider is not configured")
+		}
+		credential, credentialErr := h.credentials.RunnerGitCredential(ctx, actor, projectID, repository.ID)
+		if credentialErr != nil {
+			return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "could not issue GitHub runner credential")
+		}
+		gitToken = credential.Token
+	}
+	job := runner.Job{ID: run.ID, AutonomousRunID: workflowID, AgentRunID: run.ID, Provider: run.AgentProvider, Model: run.Model, Prompt: run.ExecutionInputs.Prompt, RepositoryURL: repository.CloneURL, BaseSHA: run.BaseSHA, Branch: run.Branch, PushBranch: pushBranch, CommitMessage: "chore: update Forgeflow work item", WorkspaceRoot: root, Workspace: filepath.Join(root, run.ID), Image: h.runnerImage, TimeoutSeconds: 3600, CPULimit: h.runnerCPU, MemoryLimit: h.runnerMemory, PidsLimit: h.runnerPids, NetworkMode: networkMode, AllowedHosts: []string{"github.com"}, MCPPermissions: run.ExecutionInputs.MCPPermissions, GitToken: gitToken}
 	result, dispatchErr := h.dispatcher.Dispatch(ctx, job)
 	output := result.Output
 	if len(output) > 480*1024 {
@@ -216,6 +242,13 @@ func main() {
 	notificationStore := notification.NewPostgresStore(pool)
 	automationService := automation.NewService(automation.NewPostgresStore(pool), notificationStore)
 	githubStore := githubintegration.NewPostgresStore(pool)
+	githubAppConfig := githubintegration.AppConfig{ID: cfg.GitHubAppID, Slug: cfg.GitHubAppSlug, PrivateKey: cfg.GitHubAppPrivateKey, CallbackURL: cfg.GitHubAppCallbackURL, WebBaseURL: cfg.WebBaseURL, ClientID: cfg.GitHubAppClientID, ClientSecret: cfg.GitHubAppClientSecret, UserCallbackURL: cfg.GitHubAppUserCallbackURL, TokenEncryptionKey: cfg.GitHubAppTokenEncryptionKey}
+	githubClient, err := githubintegration.NewAppClient(githubAppConfig)
+	if err != nil {
+		logger.Error("configure GitHub App client", "error", err)
+		os.Exit(1)
+	}
+	githubService := githubintegration.NewService(githubStore, githubClient, githubAppConfig, nil, nil, time.Now, nil)
 	webhookStore := githubintegration.NewPostgresWebhookStore(pool)
 	agentRunStore := agentrun.NewPostgresStore(pool)
 	webhookStore.SetAgentRunProjector(agentRunStore)
@@ -226,7 +259,7 @@ func main() {
 		dispatcher = runner.HTTPDispatcher{BaseURL: cfg.RunnerURL, Token: cfg.RunnerToken}
 	}
 	go runAgentRunWatchdog(ctx, logger, agentRunWatchdog)
-	processor := outbox.NewPostgresProcessor(pool, eventHandler{logger: logger, automation: automationService, webhooks: webhookStore, repositories: githubStore, agentRuns: agentRunWatchdog, autonomous: autonomousService, dispatcher: dispatcher, workspaceRoot: cfg.RunnerWorkspaceRoot}, time.Now)
+	processor := outbox.NewPostgresProcessor(pool, eventHandler{logger: logger, automation: automationService, webhooks: webhookStore, repositories: githubStore, credentials: githubService, agentRuns: agentRunWatchdog, autonomous: autonomousService, dispatcher: dispatcher, workspaceRoot: cfg.RunnerWorkspaceRoot, runnerImage: cfg.RunnerImage, runnerCPU: cfg.RunnerCPULimit, runnerMemory: cfg.RunnerMemoryLimit, runnerPids: cfg.RunnerPidsLimit, runnerNetwork: cfg.RunnerNetworkMode}, time.Now)
 	if err := processor.Run(ctx, time.Second); err != nil && err != context.Canceled {
 		logger.Error("worker stopped", "error", err)
 		os.Exit(1)

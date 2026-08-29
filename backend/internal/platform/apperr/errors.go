@@ -12,6 +12,7 @@ const (
 	CodeNotFound              = "NOT_FOUND"
 	CodeConflict              = "CONFLICT"
 	CodeRateLimited           = "RATE_LIMITED"
+	CodeRepositoryEmpty       = "REPOSITORY_EMPTY"
 	CodeSpecificationNotReady = "SPECIFICATION_NOT_READY"
 	CodeStaleSpecification    = "STALE_SPECIFICATION"
 	CodeAICannotVerify        = "AI_CANNOT_VERIFY"
@@ -50,6 +51,10 @@ func From(err error) *Error {
 	var appErr *Error
 	if errors.As(err, &appErr) {
 		return appErr
+	}
+	var sqlStateErr interface{ SQLState() string }
+	if errors.As(err, &sqlStateErr) && sqlStateErr.SQLState() == "22P02" {
+		return New(CodeInvalidArgument, 422, "request contains an invalid identifier", nil)
 	}
 	return Wrap(CodeInternal, 500, "internal server error", err)
 }

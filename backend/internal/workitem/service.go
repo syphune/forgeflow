@@ -2,10 +2,13 @@ package workitem
 
 import (
 	"context"
+	"path"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/forgeflow/forgeflow/backend/internal/audit"
+	"github.com/forgeflow/forgeflow/backend/internal/branchplan"
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/httpapi"
@@ -20,8 +23,12 @@ type Service struct {
 	spec        *specification.Service
 	workflow    *workflow.Service
 	evidence    EngineeringEvidence
+	policy      DeliveryPolicyProvider
+	qa          QAEvidence
+	deployment  DeploymentEvidence
 	audit       audit.Writer
 	outbox      outbox.Writer
+	branchPlan  BranchPlanPreparer
 	now         func() time.Time
 	transaction TransactionRunner
 }
@@ -35,6 +42,73 @@ type TransactionRunner interface {
 type EngineeringEvidence interface {
 	HasPullRequest(context.Context, string, string, string, string) (bool, error)
 	HasSuccessfulCI(context.Context, string, string, string, string) (bool, error)
+}
+
+type PullRequestEvidence struct {
+	Found            bool
+	AuthorLogin      string
+	HeadSHA          string
+	State            string
+	ApprovedByLogins []string
+	ReviewerRoles    map[string][]string
+	ChangedPaths     []string
+	ChangesRequested bool
+	Merged           bool
+}
+
+type PullRequestEvidenceProvider interface {
+	PullRequestEvidence(context.Context, string, string, string, string, string) (PullRequestEvidence, error)
+}
+
+type RequiredCIEvidence interface {
+	HasRequiredCI(context.Context, string, string, string, string, string, []string) (bool, error)
+}
+
+type QAEvidence interface {
+	HasPassingQA(context.Context, string, string, string, string) (bool, error)
+}
+
+type DeploymentEvidence interface {
+	HasSuccessfulDeployment(context.Context, string, string, string) (bool, error)
+	HasProductionVerification(context.Context, string, string, string) (bool, error)
+}
+
+type PathReviewRule struct {
+	Pattern       string
+	MinApprovals  int
+	RequiredRoles []string
+}
+
+type ReviewPolicy struct {
+	MinApprovals       int
+	ForbidSelfApproval bool
+	RequiredRoles      []string
+	PathRules          []PathReviewRule
+}
+
+type RiskRule struct {
+	MinApprovals                  int
+	RequiredRoles                 []string
+	RequireQA                     bool
+	RequireRollbackPlan           bool
+	RequireProductionVerification bool
+}
+
+type DeliveryPolicy struct {
+	ReleaseMode    string
+	RequiredChecks []string
+	Review         ReviewPolicy
+	RiskRules      map[RiskLevel]RiskRule
+}
+
+type DeliveryPolicyProvider interface {
+	DeliveryPolicy(context.Context, string, string) (DeliveryPolicy, error)
+}
+
+type BranchPlanPreparer interface {
+	Prepare(context.Context, identity.Actor, branchplan.WorkItemInput, branchplan.PreviewInput) (branchplan.Plan, error)
+	HasPlan(context.Context, string, string, string) (bool, error)
+	HasSync(context.Context, string, string, string) (bool, error)
 }
 
 type directTransactionRunner struct{}
@@ -55,6 +129,35 @@ func (s *Service) SetEngineeringEvidence(evidence EngineeringEvidence) {
 	s.evidence = evidence
 }
 
+func (s *Service) SetDeliveryPolicyProvider(provider DeliveryPolicyProvider) {
+	s.policy = provider
+}
+
+func (s *Service) SetQAEvidence(evidence QAEvidence) {
+	s.qa = evidence
+}
+
+func (s *Service) SetDeploymentEvidence(evidence DeploymentEvidence) {
+	s.deployment = evidence
+}
+
+func (s *Service) SetBranchPlanPreparer(preparer BranchPlanPreparer) {
+	s.branchPlan = preparer
+}
+
+func (s *Service) BranchPlanInput(ctx context.Context, projectID string, actor identity.Actor, id string) (branchplan.WorkItemInput, error) {
+	scope := Scope{OrganizationID: actor.OrganizationID, ProjectID: strings.TrimSpace(projectID)}
+	item, err := s.Get(ctx, scope, actor, id)
+	if err != nil {
+		return branchplan.WorkItemInput{}, err
+	}
+	assignee := ""
+	if item.AssigneeID == actor.ID {
+		assignee = actor.Login
+	}
+	return branchplan.WorkItemInput{ID: item.ID, Key: item.Key, Title: item.Title, Type: string(item.Type), ProjectID: item.ProjectID, RepositoryID: s.repositoryIDFor(ctx, scope, item), Assignee: assignee, AssigneeID: item.AssigneeID, Version: item.Version}, nil
+}
+
 func (s *Service) Create(ctx context.Context, scope Scope, actor identity.Actor, input CreateInput) (*WorkItem, error) {
 	if err := authorize(scope, actor, identity.CapabilityWorkItemCreate); err != nil {
 		return nil, err
@@ -73,6 +176,10 @@ func (s *Service) Create(ctx context.Context, scope Scope, actor identity.Actor,
 	}
 	if input.EstimatePoints != nil && *input.EstimatePoints < 0 {
 		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "estimate_points cannot be negative", nil)
+	}
+	input.RiskLevel = normalizedRiskLevel(input.RiskLevel)
+	if !validRiskLevel(input.RiskLevel) {
+		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "unsupported risk level", map[string]any{"risk_level": input.RiskLevel})
 	}
 	if input.ReporterID == "" {
 		input.ReporterID = actor.ID
@@ -106,6 +213,86 @@ func (s *Service) Get(ctx context.Context, scope Scope, actor identity.Actor, id
 		return nil, err
 	}
 	return s.repository.Get(ctx, scope, id)
+}
+
+func (s *Service) WorkItemState(ctx context.Context, organizationID, projectID, id string) (specification.WorkItemState, error) {
+	item, err := s.repository.Get(ctx, Scope{OrganizationID: organizationID, ProjectID: projectID}, id)
+	if err != nil {
+		return specification.WorkItemState{}, err
+	}
+	state := specification.WorkItemState{Status: item.Status, SpecificationPhase: specification.SpecificationPhaseLocked}
+	if item.Status == workflow.Raw {
+		state.SpecificationPhase = specification.SpecificationPhaseRaw
+		return state, nil
+	}
+	if s.workflow == nil {
+		if item.Status == workflow.ReviewRequired {
+			state.SpecificationPhase = specification.SpecificationPhaseReview
+		} else if item.Status == workflow.Refining {
+			state.SpecificationPhase = specification.SpecificationPhaseRefining
+		}
+		return state, nil
+	}
+	projectWorkflow, err := s.workflow.WorkflowFor(ctx, organizationID, projectID)
+	if err != nil {
+		return specification.WorkItemState{}, err
+	}
+	status, exists := projectWorkflow.Statuses[item.Status]
+	if !exists {
+		return state, nil
+	}
+	reviewStatus := item.Status == workflow.ReviewRequired
+	lockedStatus := item.Status == workflow.Ready
+	for _, transition := range projectWorkflow.Transitions {
+		requiresSpecification := containsWorkflowRule(transition.Required, workflow.RequireSpecificationReady)
+		if requiresSpecification && transition.From == item.Status {
+			reviewStatus = true
+		}
+		if (requiresSpecification || transition.To == workflow.Ready) && transition.To == item.Status {
+			lockedStatus = true
+		}
+	}
+	if lockedStatus {
+		return state, nil
+	}
+	if reviewStatus {
+		state.SpecificationPhase = specification.SpecificationPhaseReview
+		return state, nil
+	}
+	if status.Category == "TODO" && !status.IsTerminal {
+		state.SpecificationPhase = specification.SpecificationPhaseRefining
+	}
+	return state, nil
+}
+
+func (s *Service) RefinementTransitionKey(ctx context.Context, organizationID, projectID string) (string, error) {
+	if s.workflow == nil {
+		return "start_refining", nil
+	}
+	projectWorkflow, err := s.workflow.WorkflowFor(ctx, organizationID, projectID)
+	if err != nil {
+		return "", err
+	}
+	best := ""
+	for key, transition := range projectWorkflow.Transitions {
+		if transition.From != workflow.Raw || transition.To == workflow.Ready || containsWorkflowRule(transition.Required, workflow.RequireSpecificationReady) {
+			continue
+		}
+		target, exists := projectWorkflow.Statuses[transition.To]
+		if !exists || target.Category != "TODO" || target.IsTerminal {
+			continue
+		}
+		if key == "start_refining" {
+			return key, nil
+		}
+		if best == "" || key < best {
+			best = key
+		}
+	}
+	if best == "" {
+		return "", apperr.New(apperr.CodeConflict, 409, "workflow has no refinement transition from RAW", nil)
+	}
+	return best, nil
 }
 
 func (s *Service) List(ctx context.Context, scope Scope, actor identity.Actor, filter ListFilter) ([]*WorkItem, error) {
@@ -149,7 +336,39 @@ func (s *Service) ListPage(ctx context.Context, scope Scope, actor identity.Acto
 	if cursor, err := decodeWorkItemCursor(filter.Cursor); err == nil && cursor.Sort != "" && cursor.Sort != filter.Sort {
 		return ListResult{}, apperr.New(apperr.CodeInvalidArgument, 422, "cursor does not match work item sort", nil)
 	}
+	if (filter.ExcludeTerminal || filter.ExcludeTerminalCompletedBefore != nil) && filter.Status == "" {
+		projectWorkflow, err := s.workflow.WorkflowFor(ctx, scope.OrganizationID, scope.ProjectID)
+		if err != nil {
+			return ListResult{}, err
+		}
+		filter.ExcludedStatuses = make([]string, 0, len(projectWorkflow.Statuses))
+		for key, status := range projectWorkflow.Statuses {
+			if status.IsTerminal {
+				filter.ExcludedStatuses = append(filter.ExcludedStatuses, key)
+			}
+		}
+		sort.Strings(filter.ExcludedStatuses)
+	}
 	return s.repository.ListPage(ctx, scope, filter)
+}
+
+func (s *Service) completionTimestamp(ctx context.Context, scope Scope, before *WorkItem, targetStatus string) (*time.Time, error) {
+	projectWorkflow, err := s.workflow.WorkflowFor(ctx, scope.OrganizationID, scope.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	status, ok := projectWorkflow.Statuses[targetStatus]
+	if !ok {
+		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "target status is not configured for this project", map[string]any{"status": targetStatus})
+	}
+	if !status.IsTerminal {
+		return nil, nil
+	}
+	if before != nil && before.CompletedAt != nil {
+		return before.CompletedAt, nil
+	}
+	completedAt := s.now().UTC()
+	return &completedAt, nil
 }
 
 func (s *Service) ColumnOrderingVersions(ctx context.Context, scope Scope, actor identity.Actor, sprintID string) (map[string]int64, error) {
@@ -230,7 +449,11 @@ func (s *Service) Move(ctx context.Context, scope Scope, actor identity.Actor, i
 			if transition.To != input.TargetStatus {
 				return apperr.New(apperr.CodeConflict, 409, "transition target does not match destination column", map[string]any{"expected_status": transition.To, "target_status": input.TargetStatus})
 			}
-			if err := s.validateTransition(txCtx, scope, actor, before, transition); err != nil {
+			if err := s.validateTransition(txCtx, scope, actor, before, transition, false); err != nil {
+				return err
+			}
+			input.CompletedAt, err = s.completionTimestamp(txCtx, scope, before, input.TargetStatus)
+			if err != nil {
 				return err
 			}
 		}
@@ -267,12 +490,15 @@ func (s *Service) Update(ctx context.Context, scope Scope, actor identity.Actor,
 		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "expected_version is required", nil)
 	}
 	if input.Title == nil && input.Description == nil {
-		if input.Priority == nil && !input.DueAtSet && !input.EstimatePointsSet && !input.SprintIDSet && !input.ParentIDSet && !input.RepositoryIDSet {
+		if input.Priority == nil && !input.RiskLevelSet && !input.DueAtSet && !input.EstimatePointsSet && !input.SprintIDSet && !input.ParentIDSet && !input.RepositoryIDSet {
 			return nil, apperr.New(apperr.CodeInvalidArgument, 422, "at least one editable field is required", nil)
 		}
 	}
 	if input.Priority != nil && !validPriority(*input.Priority) {
 		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "unsupported priority", map[string]any{"priority": *input.Priority})
+	}
+	if input.RiskLevelSet && (input.RiskLevel == nil || !validRiskLevel(normalizedRiskLevel(*input.RiskLevel))) {
+		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "unsupported risk level", nil)
 	}
 	if input.EstimatePoints != nil && *input.EstimatePoints < 0 {
 		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "estimate_points cannot be negative", nil)
@@ -328,6 +554,9 @@ func (s *Service) updateMutation(ctx context.Context, scope Scope, actor identit
 		}
 		if input.Priority != nil {
 			item.Priority = strings.ToUpper(strings.TrimSpace(*input.Priority))
+		}
+		if input.RiskLevelSet && input.RiskLevel != nil {
+			item.RiskLevel = normalizedRiskLevel(*input.RiskLevel)
 		}
 		if input.DueAtSet {
 			item.DueAt = input.DueAt
@@ -446,6 +675,31 @@ func (s *Service) Transition(ctx context.Context, scope Scope, actor identity.Ac
 	if input.ExpectedVersion < 1 || strings.TrimSpace(input.TransitionKey) == "" {
 		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "transition_key and expected_version are required", nil)
 	}
+	if s.branchPlan != nil {
+		before, loadErr := s.repository.Get(ctx, scope, id)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		transition, transitionErr := s.workflow.TransitionForProject(ctx, scope.OrganizationID, scope.ProjectID, before.Status, input.TransitionKey)
+		if transitionErr != nil {
+			return nil, transitionErr
+		}
+		if before.Version != input.ExpectedVersion {
+			return nil, apperr.New(apperr.CodeConflict, 409, "work item version is stale", map[string]any{"expected_version": input.ExpectedVersion, "current_version": before.Version})
+		}
+		if transition.To == workflow.InProgress || containsWorkflowRule(transition.Required, workflow.RequireBranchPlan) {
+			if validateErr := s.validateTransition(ctx, scope, actor, before, transition, true); validateErr != nil {
+				return nil, validateErr
+			}
+			planInput := branchplan.WorkItemInput{ID: before.ID, Key: before.Key, Title: before.Title, Type: string(before.Type), ProjectID: before.ProjectID, RepositoryID: s.repositoryIDFor(ctx, scope, before), AssigneeID: before.AssigneeID, Version: before.Version}
+			if before.AssigneeID == actor.ID {
+				planInput.Assignee = actor.Login
+			}
+			if _, prepareErr := s.branchPlan.Prepare(ctx, actor, planInput, branchplan.PreviewInput{}); prepareErr != nil {
+				return nil, prepareErr
+			}
+		}
+	}
 	var result *WorkItem
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
 		var err error
@@ -464,11 +718,16 @@ func (s *Service) transitionMutation(ctx context.Context, scope Scope, actor ide
 	if err != nil {
 		return nil, err
 	}
-	if err := s.validateTransition(ctx, scope, actor, before, transition); err != nil {
+	if err := s.validateTransition(ctx, scope, actor, before, transition, false); err != nil {
+		return nil, err
+	}
+	completedAt, err := s.completionTimestamp(ctx, scope, before, transition.To)
+	if err != nil {
 		return nil, err
 	}
 	updated, err := s.repository.Update(ctx, scope, id, input.ExpectedVersion, func(item *WorkItem) error {
 		item.Status = transition.To
+		item.CompletedAt = completedAt
 		return nil
 	})
 	if err != nil {
@@ -480,8 +739,50 @@ func (s *Service) transitionMutation(ctx context.Context, scope Scope, actor ide
 	return updated, s.emit(ctx, outbox.Event{OrganizationID: scope.OrganizationID, EventType: "work_item.transitioned", AggregateType: "work_item", AggregateID: id, IdempotencyKey: "work_item.transitioned:" + id + ":" + itoa(updated.Version), Payload: map[string]any{"project_id": scope.ProjectID, "from": before.Status, "to": updated.Status}, OccurredAt: s.now().UTC()})
 }
 
-func (s *Service) validateTransition(ctx context.Context, scope Scope, actor identity.Actor, before *WorkItem, transition workflow.Transition) error {
+func (s *Service) validateTransition(ctx context.Context, scope Scope, actor identity.Actor, before *WorkItem, transition workflow.Transition, skipBranchRules bool) error {
 	repositoryID := s.repositoryIDFor(ctx, scope, before)
+	policy := DeliveryPolicy{}
+	if s.policy != nil {
+		var err error
+		policy, err = s.policy.DeliveryPolicy(ctx, scope.OrganizationID, scope.ProjectID)
+		if err != nil {
+			return err
+		}
+	}
+	var targetStatus workflow.Status
+	targetExists := false
+	if s.workflow != nil {
+		projectWorkflow, err := s.workflow.WorkflowFor(ctx, scope.OrganizationID, scope.ProjectID)
+		if err != nil {
+			return err
+		}
+		targetStatus, targetExists = projectWorkflow.Statuses[transition.To]
+	}
+	releaseTransition := policy.ReleaseMode == "release_gated" && isReleaseTransition(transition.To)
+	var pullRequest PullRequestEvidence
+	pullRequestLoaded := false
+	loadPullRequest := func(required bool) error {
+		if pullRequestLoaded {
+			return nil
+		}
+		provider, ok := s.evidence.(PullRequestEvidenceProvider)
+		if !ok {
+			if required {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "pull request review evidence is unavailable", nil)
+			}
+			return nil
+		}
+		var err error
+		pullRequest, err = provider.PullRequestEvidence(ctx, scope.OrganizationID, scope.ProjectID, repositoryID, before.Key, "")
+		if err != nil {
+			return err
+		}
+		pullRequestLoaded = true
+		if !pullRequest.Found || strings.TrimSpace(pullRequest.HeadSHA) == "" {
+			return apperr.New(apperr.CodeInvalidArgument, 422, "current pull request head is required", map[string]any{"work_item_key": before.Key})
+		}
+		return nil
+	}
 	// READY is a platform invariant, even when a project customizes its
 	// workflow. A saved workflow cannot weaken the specification quality gate.
 	if transition.To == workflow.Ready {
@@ -536,7 +837,101 @@ func (s *Service) validateTransition(ctx context.Context, scope Scope, actor ide
 			if !hasCI {
 				return apperr.New(apperr.CodeInvalidArgument, 422, "successful CI is required before QA", map[string]any{"work_item_key": before.Key})
 			}
+		case workflow.RequireCurrentCIChecks:
+			if repositoryID == "" || s.evidence == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "current-head CI checks are required", nil)
+			}
+			if err := loadPullRequest(true); err != nil {
+				return err
+			}
+			ci, ok := s.evidence.(RequiredCIEvidence)
+			if !ok {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "current-head CI evidence is unavailable", nil)
+			}
+			passed, err := ci.HasRequiredCI(ctx, scope.OrganizationID, scope.ProjectID, repositoryID, before.Key, pullRequest.HeadSHA, policy.RequiredChecks)
+			if err != nil {
+				return err
+			}
+			if !passed {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "required CI checks have not passed on the current pull request head", map[string]any{"head_sha": pullRequest.HeadSHA, "required_checks": policy.RequiredChecks})
+			}
+		case workflow.RequirePullRequestReview:
+			if repositoryID == "" || s.evidence == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "pull request review evidence is required", nil)
+			}
+			if err := loadPullRequest(true); err != nil {
+				return err
+			}
+			reviewPolicy := policy.Review
+			if releaseTransition {
+				riskRule := deliveryRiskRule(policy, before.RiskLevel)
+				if riskRule.MinApprovals > reviewPolicy.MinApprovals {
+					reviewPolicy.MinApprovals = riskRule.MinApprovals
+				}
+				reviewPolicy.RequiredRoles = append(reviewPolicy.RequiredRoles, riskRule.RequiredRoles...)
+			}
+			if err := validatePullRequestReview(pullRequest, reviewPolicy); err != nil {
+				return err
+			}
+		case workflow.RequireQAPassing:
+			if s.qa == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "QA evidence is unavailable", nil)
+			}
+			if err := loadPullRequest(true); err != nil {
+				return err
+			}
+			if releaseTransition && !pullRequest.Merged {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "pull request must be approved and merged before release", nil)
+			}
+			passed, err := s.qa.HasPassingQA(ctx, scope.OrganizationID, scope.ProjectID, before.ID, pullRequest.HeadSHA)
+			if err != nil {
+				return err
+			}
+			if !passed {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "all required QA tests must pass on the current commit", nil)
+			}
+		case workflow.RequireReleaseApproval:
+			if actor.Type != "human" || !actor.Has(identity.CapabilityReleaseApprove) {
+				return apperr.New(apperr.CodeForbidden, 403, "a human release approver is required", nil)
+			}
+			if policy.ReleaseMode == "release_gated" {
+				if err := loadPullRequest(true); err != nil {
+					return err
+				}
+				if sameIdentity(actor, pullRequest.AuthorLogin) || containsIdentity(pullRequest.ApprovedByLogins, actor) {
+					return apperr.New(apperr.CodeForbidden, 403, "production approver must be separate from the PR author and reviewers", nil)
+				}
+			}
+		case workflow.RequireDeploymentSuccess:
+			if s.deployment == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "successful deployment evidence is unavailable", nil)
+			}
+			ok, err := s.deployment.HasSuccessfulDeployment(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "a successful deployment is required before production verification", nil)
+			}
+		case workflow.RequireProductionVerification:
+			if s.deployment == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "production verification evidence is unavailable", nil)
+			}
+			ok, err := s.deployment.HasProductionVerification(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "production verification is required before completion", nil)
+			}
+		case workflow.RequireRollbackPlan:
+			if err := s.requireRollbackPlan(ctx, scope, before.ID); err != nil {
+				return err
+			}
 		case workflow.RequireHumanVerification:
+			if actor.Type != "human" {
+				return apperr.New(apperr.CodeForbidden, 403, "only a human can complete this transition", nil)
+			}
 			readiness, evaluateErr := s.spec.Readiness(ctx, scope.OrganizationID, scope.ProjectID, before.ID, string(before.Type), before.Title, repositoryID)
 			if evaluateErr != nil {
 				return evaluateErr
@@ -553,9 +948,246 @@ func (s *Service) validateTransition(ctx context.Context, scope Scope, actor ide
 					return apperr.New(apperr.CodeForbidden, 403, "permission denied", map[string]any{"capability": permission, "transition": transition.Key})
 				}
 			}
+		case workflow.RequireBranchPlan:
+			if skipBranchRules || s.branchPlan == nil {
+				continue
+			}
+			hasPlan, planErr := s.branchPlan.HasPlan(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+			if planErr != nil {
+				return planErr
+			}
+			if !hasPlan {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "a branch plan is required before starting work", nil)
+			}
+		case workflow.RequireBranchSync:
+			if skipBranchRules || s.branchPlan == nil {
+				continue
+			}
+			synced, syncErr := s.branchPlan.HasSync(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+			if syncErr != nil {
+				return syncErr
+			}
+			if !synced {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "branch sync-backport must be merged before completing the work item", nil)
+			}
+		}
+	}
+	if releaseTransition {
+		riskRule := deliveryRiskRule(policy, before.RiskLevel)
+		if riskRule.RequireQA && !containsWorkflowRule(transition.Required, workflow.RequireQAPassing) {
+			if s.qa == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "QA evidence is unavailable", nil)
+			}
+			passed, err := s.qa.HasPassingQA(ctx, scope.OrganizationID, scope.ProjectID, before.ID, pullRequestHead(pullRequest, pullRequestLoaded))
+			if err != nil {
+				return err
+			}
+			if !passed {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "all required QA tests must pass before release", nil)
+			}
+		}
+		if riskRule.RequireRollbackPlan && !containsWorkflowRule(transition.Required, workflow.RequireRollbackPlan) {
+			if err := s.requireRollbackPlan(ctx, scope, before.ID); err != nil {
+				return err
+			}
+		}
+		if riskRule.RequireProductionVerification && transition.To == workflow.Done && !containsWorkflowRule(transition.Required, workflow.RequireProductionVerification) {
+			if s.deployment == nil {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "production verification evidence is unavailable", nil)
+			}
+			verified, err := s.deployment.HasProductionVerification(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+			if err != nil {
+				return err
+			}
+			if !verified {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "production verification is required before completion", nil)
+			}
+		}
+	}
+	if before.RiskLevel == RiskHigh || before.RiskLevel == RiskCritical {
+		if targetExists && targetStatus.IsTerminal && targetStatus.Category == "DONE" && !containsWorkflowRule(transition.Required, workflow.RequireRollbackPlan) {
+			if err := s.requireRollbackPlan(ctx, scope, before.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if targetExists && targetStatus.IsTerminal && targetStatus.Category == "DONE" && s.branchPlan != nil {
+		hasPlan, err := s.branchPlan.HasPlan(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+		if err != nil {
+			return err
+		}
+		if hasPlan {
+			synced, err := s.branchPlan.HasSync(ctx, scope.OrganizationID, scope.ProjectID, before.ID)
+			if err != nil {
+				return err
+			}
+			if !synced {
+				return apperr.New(apperr.CodeInvalidArgument, 422, "hotfix or release branch sync-backport must be merged before completion", nil)
+			}
 		}
 	}
 	return nil
+}
+
+func (s *Service) requireRollbackPlan(ctx context.Context, scope Scope, workItemID string) error {
+	spec, err := s.spec.Get(ctx, scope.OrganizationID, scope.ProjectID, workItemID)
+	if err != nil {
+		return err
+	}
+	field, ok := spec.Fields[specification.RollbackPlan]
+	if !ok || strings.TrimSpace(field.Value) == "" || field.VerificationStatus != specification.VerifiedByHuman || field.Provenance == specification.AIHypothesis || field.Provenance == specification.AIInferred {
+		return apperr.New(apperr.CodeSpecificationNotReady, 422, "a human-verified rollback plan is required", nil)
+	}
+	return nil
+}
+
+func isReleaseTransition(status string) bool {
+	switch status {
+	case workflow.ReadyForRelease, workflow.Deploying, workflow.ProductionVerify, workflow.Done:
+		return true
+	default:
+		return false
+	}
+}
+
+func deliveryRiskRule(policy DeliveryPolicy, level RiskLevel) RiskRule {
+	level = normalizedRiskLevel(level)
+	if policy.RiskRules == nil {
+		return RiskRule{}
+	}
+	if rule, ok := policy.RiskRules[level]; ok {
+		return rule
+	}
+	return policy.RiskRules[RiskNormal]
+}
+
+func pullRequestHead(evidence PullRequestEvidence, loaded bool) string {
+	if loaded {
+		return evidence.HeadSHA
+	}
+	return ""
+}
+
+func validatePullRequestReview(evidence PullRequestEvidence, policy ReviewPolicy) error {
+	if evidence.ChangesRequested {
+		return apperr.New(apperr.CodeInvalidArgument, 422, "pull request has requested changes", nil)
+	}
+	approvers := make(map[string]struct{}, len(evidence.ApprovedByLogins))
+	for _, login := range evidence.ApprovedByLogins {
+		login = strings.ToLower(strings.TrimSpace(login))
+		if login == "" || sameIdentityValue(login, evidence.AuthorLogin) {
+			continue
+		}
+		approvers[login] = struct{}{}
+	}
+	minApprovals := policy.MinApprovals
+	for _, rule := range policy.PathRules {
+		matched := false
+		for _, changed := range evidence.ChangedPaths {
+			if pathPatternMatch(rule.Pattern, changed) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			if rule.MinApprovals > minApprovals {
+				minApprovals = rule.MinApprovals
+			}
+			if err := requireReviewerRoles(evidence, rule.RequiredRoles, approvers); err != nil {
+				return err
+			}
+		}
+	}
+	if len(approvers) < minApprovals {
+		return apperr.New(apperr.CodeInvalidArgument, 422, "pull request does not have the required independent approvals", map[string]any{"required": minApprovals, "approved": len(approvers)})
+	}
+	return requireReviewerRoles(evidence, policy.RequiredRoles, approvers)
+}
+
+func pathPatternMatch(pattern, value string) bool {
+	patternParts := strings.Split(strings.Trim(pattern, "/"), "/")
+	valueParts := strings.Split(strings.Trim(value, "/"), "/")
+	var match func(int, int) bool
+	match = func(patternIndex, valueIndex int) bool {
+		if patternIndex == len(patternParts) {
+			return valueIndex == len(valueParts)
+		}
+		if patternParts[patternIndex] == "**" {
+			return match(patternIndex+1, valueIndex) || (valueIndex < len(valueParts) && match(patternIndex, valueIndex+1))
+		}
+		if valueIndex == len(valueParts) {
+			return false
+		}
+		ok, err := path.Match(patternParts[patternIndex], valueParts[valueIndex])
+		return err == nil && ok && match(patternIndex+1, valueIndex+1)
+	}
+	return match(0, 0)
+}
+
+func requireReviewerRoles(evidence PullRequestEvidence, roles []string, approvers map[string]struct{}) error {
+	for _, required := range roles {
+		required = strings.ToLower(strings.TrimSpace(required))
+		found := false
+		for login := range approvers {
+			for _, role := range evidence.ReviewerRoles[login] {
+				if strings.EqualFold(strings.TrimSpace(role), required) {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			return apperr.New(apperr.CodeInvalidArgument, 422, "required reviewer role is missing", map[string]any{"role": required})
+		}
+	}
+	return nil
+}
+
+func sameIdentity(actor identity.Actor, value string) bool {
+	return sameIdentityValue(actor.Login, value) || sameIdentityValue(actor.ID, value)
+}
+
+func sameIdentityValue(left, right string) bool {
+	left, right = strings.ToLower(strings.TrimSpace(left)), strings.ToLower(strings.TrimSpace(right))
+	return left != "" && right != "" && left == right
+}
+
+func containsIdentity(values []string, actor identity.Actor) bool {
+	for _, value := range values {
+		if sameIdentity(actor, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsWorkflowRule(rules []workflow.RuleType, wanted workflow.RuleType) bool {
+	for _, rule := range rules {
+		if rule == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func validRiskLevel(level RiskLevel) bool {
+	switch normalizedRiskLevel(level) {
+	case RiskLow, RiskNormal, RiskHigh, RiskCritical:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedRiskLevel(level RiskLevel) RiskLevel {
+	level = RiskLevel(strings.ToUpper(strings.TrimSpace(string(level))))
+	if level == "" {
+		return RiskNormal
+	}
+	return level
 }
 
 func (s *Service) Readiness(ctx context.Context, scope Scope, actor identity.Actor, item *WorkItem) (specification.Readiness, error) {
@@ -563,6 +1195,26 @@ func (s *Service) Readiness(ctx context.Context, scope Scope, actor identity.Act
 		return specification.Readiness{}, err
 	}
 	return s.spec.Readiness(ctx, scope.OrganizationID, scope.ProjectID, item.ID, string(item.Type), item.Title, s.repositoryIDFor(ctx, scope, item))
+}
+
+// RequiredRegressionTestPositions exposes only the specification data needed
+// by the QA evidence gate; optional and informational cases never block a
+// release.
+func (s *Service) RequiredRegressionTestPositions(ctx context.Context, organizationID, projectID, workItemID string) ([]int, error) {
+	spec, err := s.spec.Get(ctx, organizationID, projectID, workItemID)
+	if err != nil {
+		return nil, err
+	}
+	if spec == nil {
+		return nil, nil
+	}
+	positions := make([]int, 0, len(spec.RegressionCases))
+	for index, testCase := range spec.RegressionCases {
+		if testCase.GateClass == "" || testCase.GateClass == specification.GateRequired {
+			positions = append(positions, index+1)
+		}
+	}
+	return positions, nil
 }
 
 func (s *Service) repositoryIDFor(ctx context.Context, scope Scope, item *WorkItem) string {

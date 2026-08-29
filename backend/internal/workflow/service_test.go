@@ -43,6 +43,44 @@ func TestDefaultTransitions(t *testing.T) {
 	}
 }
 
+func TestReleaseGatedWorkflowHasCurrentHeadAndRollbackGates(t *testing.T) {
+	input := ReleaseGatedInput()
+	workflow, err := validateSaveInput(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{ReadyForRelease, Deploying, ProductionVerify, Done, RolledBack} {
+		found := false
+		for _, status := range workflow.Statuses {
+			if status.Key == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("release workflow is missing %s", key)
+		}
+	}
+	rules := func(key string) []RuleType {
+		for _, transition := range workflow.Transitions {
+			if transition.Key == key {
+				return transition.Required
+			}
+		}
+		return nil
+	}
+	for _, rule := range []RuleType{RequireCurrentCIChecks, RequirePullRequestReview, RequireQAPassing, RequireRollbackPlan} {
+		if !containsRule(rules("prepare_release"), rule) {
+			t.Fatalf("prepare_release is missing %s: %#v", rule, rules("prepare_release"))
+		}
+	}
+	for _, key := range []string{"release_failed", "deployment_failed", "verification_failed"} {
+		if !containsRule(rules(key), RequireRollbackPlan) {
+			t.Fatalf("%s is missing rollback gate", key)
+		}
+	}
+}
+
 func TestTransitionRejectsWrongCurrentStatus(t *testing.T) {
 	_, err := NewService(Default()).Transition(Raw, "mark_ready")
 	if err == nil {

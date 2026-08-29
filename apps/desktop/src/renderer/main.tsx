@@ -30,6 +30,38 @@ function loadThemePreference() {
 const initialTheme = loadThemePreference();
 document.documentElement.dataset.theme = initialTheme;
 
+const LOCAL_PROJECT_SETTINGS_KEY = "forgeflow.desktop.local-project.v1";
+const defaultLocalProjectSettings = {
+  root: "",
+  apiBaseURL: "",
+  projectID: "",
+  repositoryID: "",
+  cloneName: "",
+  worktreeName: "agent-run",
+  branchName: "forgeflow/agent-run",
+  baseRef: "HEAD",
+  commitMessage: "fix: implement approved change",
+};
+function loadLocalProjectSettings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LOCAL_PROJECT_SETTINGS_KEY) ?? "{}");
+    return {
+      root: typeof parsed.root === "string" && parsed.root.length <= 4096 ? parsed.root : defaultLocalProjectSettings.root,
+      apiBaseURL: typeof parsed.apiBaseURL === "string" && parsed.apiBaseURL.length <= 2048 ? parsed.apiBaseURL : defaultLocalProjectSettings.apiBaseURL,
+      projectID: typeof parsed.projectID === "string" && parsed.projectID.length <= 128 ? parsed.projectID : defaultLocalProjectSettings.projectID,
+      repositoryID: typeof parsed.repositoryID === "string" && parsed.repositoryID.length <= 128 ? parsed.repositoryID : defaultLocalProjectSettings.repositoryID,
+      cloneName: typeof parsed.cloneName === "string" && parsed.cloneName.length <= 80 ? parsed.cloneName : defaultLocalProjectSettings.cloneName,
+      worktreeName: typeof parsed.worktreeName === "string" && parsed.worktreeName.length <= 80 ? parsed.worktreeName : defaultLocalProjectSettings.worktreeName,
+      branchName: typeof parsed.branchName === "string" && parsed.branchName.length <= 128 ? parsed.branchName : defaultLocalProjectSettings.branchName,
+      baseRef: typeof parsed.baseRef === "string" && parsed.baseRef.length <= 256 ? parsed.baseRef : defaultLocalProjectSettings.baseRef,
+      commitMessage: typeof parsed.commitMessage === "string" && parsed.commitMessage.length <= 200 ? parsed.commitMessage : defaultLocalProjectSettings.commitMessage,
+    };
+  } catch {
+    return { ...defaultLocalProjectSettings };
+  }
+}
+const localProjectSettings = loadLocalProjectSettings();
+
 const root = document.querySelector<HTMLDivElement>("#root");
 if (!root) throw new Error("renderer root is missing");
 
@@ -164,6 +196,10 @@ root.innerHTML = `
     .repo-picker { display: flex !important; gap: 8px; }
     .repo-picker input { flex: 1; min-width: 0; }
     .repo-picker button { margin: 0; padding: 9px 11px; }
+    .remote-clone { border-top: 1px solid var(--line-soft); margin-top: 12px; padding-top: 12px; }
+    .remote-clone summary { color: var(--amber); cursor: pointer; font-size: 12px; font-weight: 650; }
+    .remote-clone p { color: var(--ink-dim); font-size: 11px; line-height: 1.5; margin: 9px 0; }
+    .remote-clone label { color: var(--ink-soft); display: grid; font-size: 11px; gap: 6px; margin-top: 9px; }
     .local-actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .local-actions button { margin-top: 0; }
     .commit-tools { display: grid; gap: 10px; }
@@ -186,7 +222,7 @@ root.innerHTML = `
     <header class="topbar"><div class="brand"><span class="mark" aria-hidden="true"></span><span>forgeflow</span></div><div class="topbar-actions"><details class="theme-control" id="theme-control"><summary class="theme-control-trigger" aria-label="${t("nav.theme")}" aria-haspopup="menu" title="${t("nav.theme")}: ${t(`theme.${initialTheme}`)}"><span class="theme-icon">${themeIcon(initialTheme)}</span></summary><div class="theme-control-menu" role="menu" aria-label="${t("nav.theme")}">${themeOptions.map((theme) => `<button type="button" role="menuitemradio" aria-checked="${theme === initialTheme}" data-theme-option="${theme}"><span class="theme-icon">${themeIcon(theme)}</span><span>${t(`theme.${theme}`)}</span></button>`).join("")}</div></details><span class="session"><i aria-hidden="true"></i> ${t("desktop.local-session")}</span></div></header>
     <section class="welcome" aria-labelledby="desktop-heading"><p class="eyebrow">${t("desktop.workspace")}</p><h1 id="desktop-heading">${t("desktop.heading-before")}<span>${t("desktop.heading-highlight")}</span></h1><p class="lede">${t("desktop.lede")}</p></section>
     <section class="dashboard" aria-label="${t("desktop.overview")}">
-    <article class="card bridge-card"><span class="card-kicker">${t("desktop.local-bridge")}</span><div class="bridge-row"><strong class="bridge-title">${t("desktop.ready")}</strong><span class="bridge-state">${t("desktop.protected")}</span></div><div class="boundary-list"><div><span aria-hidden="true">✓</span> ${t("desktop.boundary-ipc")}</div><div><span aria-hidden="true">✓</span> ${t("desktop.boundary-worktree")}</div><div><span aria-hidden="true">✓</span> ${t("desktop.boundary-human")}</div></div><button id="health" type="button">${t("desktop.health")} <span aria-hidden="true">↗</span></button><output id="result" aria-live="polite"></output><ol class="desktop-steps" aria-label="${t("desktop.execution-steps")}"><li><details class="desktop-step" id="step-repository" open><summary class="desktop-step-heading"><span class="step-number">1</span><span><strong>${t("desktop.step-repository")}</strong><small>${t("desktop.step-repository-description")}</small></span><output id="repo-step-status" class="step-status" aria-live="polite">${t("desktop.step-needed")}</output></summary><div class="local-tools"><label class="repo-picker" for="repo-root">${t("desktop.repo-path")}<input id="repo-root" placeholder="/Users/you/code/project" autocomplete="off" /><button id="choose-repository" type="button">${t("desktop.choose-folder")}</button></label><div class="local-actions"><button id="repo-status" type="button">${t("desktop.repo-status")}</button></div></div></details></li><li><details class="desktop-step" id="step-worktree"><summary class="desktop-step-heading"><span class="step-number">2</span><span><strong>${t("desktop.step-worktree")}</strong><small>${t("desktop.step-worktree-description")}</small></span><output id="worktree-step-status" class="step-status" aria-live="polite">${t("desktop.step-locked")}</output></summary><div class="local-tools"><label for="worktree-name">${t("desktop.worktree-name")}<input id="worktree-name" value="agent-run" maxlength="80" autocomplete="off" /></label><label for="branch-name">${t("desktop.branch-name")}<input id="branch-name" value="forgeflow/agent-run" maxlength="128" autocomplete="off" /></label><label for="base-ref">${t("desktop.base-ref")}<input id="base-ref" value="HEAD" maxlength="256" autocomplete="off" /></label><div class="local-actions"><button id="create-worktree" type="button">${t("desktop.create-worktree")}</button></div></div></details></li><li><details class="desktop-step" id="step-review"><summary class="desktop-step-heading"><span class="step-number">3</span><span><strong>${t("desktop.step-review")}</strong><small>${t("desktop.step-review-description")}</small></span><output id="review-step-status" class="step-status" aria-live="polite">${t("desktop.step-locked")}</output></summary><div class="local-tools"><div class="local-actions"><button id="inspect-diff" type="button" disabled>${t("desktop.inspect-diff")}</button><button id="remove-worktree" type="button" disabled>${t("desktop.remove-worktree")}</button></div><div class="commit-tools"><label for="commit-message">${t("desktop.commit-message")}<input id="commit-message" value="Implement approved change" maxlength="200" autocomplete="off" /></label><div class="local-actions"><button id="commit-worktree" type="button" disabled>${t("desktop.commit-changes")}</button><button id="push-worktree" type="button" disabled>${t("desktop.push-branch")}</button></div></div><output id="local-result" aria-live="polite"></output><pre id="diff-output" class="diff-output" hidden></pre></div></details></li><li><details class="desktop-step" id="step-agent"><summary class="desktop-step-heading"><span class="step-number">4</span><span><strong>${t("desktop.step-agent")}</strong><small>${t("desktop.step-agent-description")}</small></span><output id="agent-step-status" class="step-status" aria-live="polite">${t("desktop.step-locked")}</output></summary><div class="agent-tools"><label for="agent-provider">${t("desktop.provider")}<select id="agent-provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label><label for="agent-prompt">${t("desktop.task-prompt")}<textarea id="agent-prompt" maxlength="131072" placeholder="${t("desktop.task-prompt-placeholder")}"></textarea></label><label class="approval" for="agent-approved"><input id="agent-approved" type="checkbox" /> ${t("desktop.approval")}</label><details class="server-sync"><summary>${t("desktop.sync-summary")}</summary><p>${t("desktop.sync-description")}</p><label for="forgeflow-api-url">${t("desktop.api-url")}<input id="forgeflow-api-url" placeholder="https://forgeflow.example.com" autocomplete="url" /></label><div class="local-actions"><button id="desktop-sign-in" type="button">${t("desktop.sign-in")}</button><button id="desktop-sign-out" type="button">${t("desktop.sign-out")}</button></div><output id="desktop-auth-result" class="auth-state" aria-live="polite"></output><label for="forgeflow-pat">${t("desktop.pat")}<input id="forgeflow-pat" type="password" maxlength="512" autocomplete="off" /></label><label for="forgeflow-project-id">${t("desktop.project-id")}<input id="forgeflow-project-id" maxlength="128" autocomplete="off" /></label><label for="forgeflow-run-id">${t("desktop.approved-run-id")}<input id="forgeflow-run-id" maxlength="128" autocomplete="off" /></label></details><div class="local-actions"><button id="run-agent" type="button">${t("desktop.run-agent")}</button><button id="cancel-agent" type="button" disabled>${t("desktop.cancel-agent")}</button></div><output id="agent-result" aria-live="polite"></output></div></details></li></ol></article>
+    <article class="card bridge-card"><span class="card-kicker">${t("desktop.local-bridge")}</span><div class="bridge-row"><strong class="bridge-title">${t("desktop.ready")}</strong><span class="bridge-state">${t("desktop.protected")}</span></div><div class="boundary-list"><div><span aria-hidden="true">✓</span> ${t("desktop.boundary-ipc")}</div><div><span aria-hidden="true">✓</span> ${t("desktop.boundary-worktree")}</div><div><span aria-hidden="true">✓</span> ${t("desktop.boundary-human")}</div></div><button id="health" type="button">${t("desktop.health")} <span aria-hidden="true">↗</span></button><output id="result" aria-live="polite"></output><ol class="desktop-steps" aria-label="${t("desktop.execution-steps")}"><li><details class="desktop-step" id="step-repository" open><summary class="desktop-step-heading"><span class="step-number">1</span><span><strong>${t("desktop.step-repository")}</strong><small>${t("desktop.step-repository-description")}</small></span><output id="repo-step-status" class="step-status" aria-live="polite">${t("desktop.step-needed")}</output></summary><div class="local-tools"><label class="repo-picker" for="repo-root"><span>${t("desktop.local-code-folder")}</span><input id="repo-root" placeholder="/Users/you/code" autocomplete="off" /><button id="choose-repository" type="button">${t("desktop.choose-folder")}</button></label><div class="local-actions"><button id="find-repositories" type="button">${t("desktop.find-projects")}</button><button id="repo-status" type="button">${t("desktop.repo-status")}</button></div><label id="local-project-picker" for="local-project" hidden><span>${t("desktop.select-project")}</span><select id="local-project"></select></label><details class="remote-clone"><summary>${t("desktop.clone-remote")}</summary><p>${t("desktop.clone-remote-description")}</p><label for="clone-api-url">${t("desktop.api-url")}<input id="clone-api-url" placeholder="https://forgeflow.example.com" autocomplete="url" /></label><label for="clone-project-id">${t("desktop.project-id")}<input id="clone-project-id" maxlength="128" /></label><label for="clone-repository-id">${t("desktop.repository-id")}<input id="clone-repository-id" maxlength="128" /></label><label for="clone-name">${t("desktop.clone-name")}<input id="clone-name" maxlength="80" placeholder="repository-name" /></label><div class="local-actions"><button id="authorize-github-code" type="button">${t("desktop.authorize-code")}</button><button id="clone-repository" type="button">${t("desktop.clone-remote-action")}</button></div><output id="clone-result" aria-live="polite"></output></details></div></details></li><li><details class="desktop-step" id="step-worktree"><summary class="desktop-step-heading"><span class="step-number">2</span><span><strong>${t("desktop.step-worktree")}</strong><small>${t("desktop.step-worktree-description")}</small></span><output id="worktree-step-status" class="step-status" aria-live="polite">${t("desktop.step-locked")}</output></summary><div class="local-tools"><label for="worktree-name">${t("desktop.worktree-name")}<input id="worktree-name" value="agent-run" maxlength="80" autocomplete="off" /></label><label for="branch-name">${t("desktop.branch-name")}<input id="branch-name" value="forgeflow/agent-run" maxlength="128" autocomplete="off" /></label><small>${t("desktop.branch-rule")}</small><label for="base-ref">${t("desktop.base-ref")}<input id="base-ref" value="HEAD" maxlength="256" autocomplete="off" /></label><div class="local-actions"><button id="create-worktree" type="button">${t("desktop.create-worktree")}</button></div></div></details></li><li><details class="desktop-step" id="step-review"><summary class="desktop-step-heading"><span class="step-number">3</span><span><strong>${t("desktop.step-review")}</strong><small>${t("desktop.step-review-description")}</small></span><output id="review-step-status" class="step-status" aria-live="polite">${t("desktop.step-locked")}</output></summary><div class="local-tools"><div class="local-actions"><button id="inspect-diff" type="button" disabled>${t("desktop.inspect-diff")}</button><button id="remove-worktree" type="button" disabled>${t("desktop.remove-worktree")}</button></div><div class="commit-tools"><label for="commit-message">${t("desktop.commit-message")}<input id="commit-message" value="fix: implement approved change" maxlength="200" autocomplete="off" /></label><small>${t("desktop.commit-rule")}</small><div class="local-actions"><button id="commit-worktree" type="button" disabled>${t("desktop.commit-changes")}</button><button id="push-worktree" type="button" disabled>${t("desktop.push-branch")}</button></div></div><output id="local-result" aria-live="polite"></output><pre id="diff-output" class="diff-output" hidden></pre></div></details></li><li><details class="desktop-step" id="step-agent"><summary class="desktop-step-heading"><span class="step-number">4</span><span><strong>${t("desktop.step-agent")}</strong><small>${t("desktop.step-agent-description")}</small></span><output id="agent-step-status" class="step-status" aria-live="polite">${t("desktop.step-locked")}</output></summary><div class="agent-tools"><label for="agent-provider">${t("desktop.provider")}<select id="agent-provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label><label for="agent-prompt">${t("desktop.task-prompt")}<textarea id="agent-prompt" maxlength="131072" placeholder="${t("desktop.task-prompt-placeholder")}"></textarea></label><label class="approval" for="agent-approved"><input id="agent-approved" type="checkbox" /> ${t("desktop.approval")}</label><details class="server-sync"><summary>${t("desktop.sync-summary")}</summary><p>${t("desktop.sync-description")}</p><label for="forgeflow-api-url">${t("desktop.api-url")}<input id="forgeflow-api-url" placeholder="https://forgeflow.example.com" autocomplete="url" /></label><div class="local-actions"><button id="desktop-sign-in" type="button">${t("desktop.sign-in")}</button><button id="desktop-sign-out" type="button">${t("desktop.sign-out")}</button></div><output id="desktop-auth-result" class="auth-state" aria-live="polite"></output><label for="forgeflow-pat">${t("desktop.pat")}<input id="forgeflow-pat" type="password" maxlength="512" autocomplete="off" /></label><label for="forgeflow-project-id">${t("desktop.project-id")}<input id="forgeflow-project-id" maxlength="128" autocomplete="off" /></label><label for="forgeflow-run-id">${t("desktop.approved-run-id")}<input id="forgeflow-run-id" maxlength="128" autocomplete="off" /></label></details><div class="local-actions"><button id="run-agent" type="button">${t("desktop.run-agent")}</button><button id="cancel-agent" type="button" disabled>${t("desktop.cancel-agent")}</button></div><output id="agent-result" aria-live="polite"></output></div></details></li></ol></article>
       <article class="card check-card"><div class="check-icon" aria-hidden="true">✦</div><div><strong>${t("desktop.evidence-title")}</strong><small>${t("desktop.evidence-description")}</small></div></article>
     </section>
     <p class="footer-note">${t("desktop.footer")}</p>
@@ -241,6 +277,16 @@ button?.addEventListener("click", async () => {
 
 const sourceRoot = document.querySelector<HTMLInputElement>("#repo-root");
 const chooseRepositoryButton = document.querySelector<HTMLButtonElement>("#choose-repository");
+const findRepositoriesButton = document.querySelector<HTMLButtonElement>("#find-repositories");
+const localProjectPicker = document.querySelector<HTMLLabelElement>("#local-project-picker");
+const localProjectSelect = document.querySelector<HTMLSelectElement>("#local-project");
+const cloneAPIURL = document.querySelector<HTMLInputElement>("#clone-api-url");
+const cloneProjectID = document.querySelector<HTMLInputElement>("#clone-project-id");
+const cloneRepositoryID = document.querySelector<HTMLInputElement>("#clone-repository-id");
+const cloneName = document.querySelector<HTMLInputElement>("#clone-name");
+const authorizeGitHubCodeButton = document.querySelector<HTMLButtonElement>("#authorize-github-code");
+const cloneRepositoryButton = document.querySelector<HTMLButtonElement>("#clone-repository");
+const cloneResult = document.querySelector<HTMLOutputElement>("#clone-result");
 const worktreeName = document.querySelector<HTMLInputElement>("#worktree-name");
 const branchName = document.querySelector<HTMLInputElement>("#branch-name");
 const baseRef = document.querySelector<HTMLInputElement>("#base-ref");
@@ -280,6 +326,34 @@ const agentStepStatus = document.querySelector<HTMLOutputElement>("#agent-step-s
 let managedWorktree = "";
 let activeAgentRunID = "";
 
+if (sourceRoot) sourceRoot.value = localProjectSettings.root;
+if (cloneAPIURL) cloneAPIURL.value = localProjectSettings.apiBaseURL;
+if (cloneProjectID) cloneProjectID.value = localProjectSettings.projectID;
+if (cloneRepositoryID) cloneRepositoryID.value = localProjectSettings.repositoryID;
+if (cloneName) cloneName.value = localProjectSettings.cloneName;
+if (worktreeName) worktreeName.value = localProjectSettings.worktreeName;
+if (branchName) branchName.value = localProjectSettings.branchName;
+if (baseRef) baseRef.value = localProjectSettings.baseRef;
+if (commitMessage) commitMessage.value = localProjectSettings.commitMessage;
+
+function persistLocalProjectSettings() {
+  try {
+    localStorage.setItem(LOCAL_PROJECT_SETTINGS_KEY, JSON.stringify({
+      root: sourceRoot?.value.trim() ?? "",
+      apiBaseURL: cloneAPIURL?.value.trim() ?? forgeflowAPIURL?.value.trim() ?? "",
+      projectID: cloneProjectID?.value.trim() ?? forgeflowProjectID?.value.trim() ?? "",
+      repositoryID: cloneRepositoryID?.value.trim() ?? "",
+      cloneName: cloneName?.value.trim() ?? "",
+      worktreeName: worktreeName?.value.trim() ?? "",
+      branchName: branchName?.value.trim() ?? "",
+      baseRef: baseRef?.value.trim() ?? "",
+      commitMessage: commitMessage?.value.trim() ?? "",
+    }));
+  } catch {
+    // Local settings are best effort; the current values remain usable.
+  }
+}
+
 function setStepStatus(element: HTMLOutputElement | null, message: string, ready: boolean) {
   if (!element) return;
   element.textContent = message;
@@ -297,7 +371,12 @@ function refreshStepStates() {
 }
 
 refreshStepStates();
-sourceRoot?.addEventListener("input", refreshStepStates);
+[sourceRoot, cloneAPIURL, cloneProjectID, cloneRepositoryID, cloneName, worktreeName, branchName, baseRef, commitMessage].forEach((field) => {
+  field?.addEventListener("input", () => {
+    persistLocalProjectSettings();
+    refreshStepStates();
+  });
+});
 
 void window.forgeflow.agentRecoveries().then((recoveries) => {
   const recoverable = recoveries.find((item) =>
@@ -317,7 +396,10 @@ async function refreshDesktopAuth() {
     desktopAuthResult.textContent = auth.signedIn
       ? t("desktop.auth-ready", { url: auth.apiBaseURL })
       : t("desktop.no-session");
-    if (auth.signedIn && forgeflowAPIURL && !forgeflowAPIURL.value) forgeflowAPIURL.value = auth.apiBaseURL;
+    if (auth.signedIn) {
+      if (forgeflowAPIURL && !forgeflowAPIURL.value) forgeflowAPIURL.value = auth.apiBaseURL;
+      if (cloneAPIURL && !cloneAPIURL.value) cloneAPIURL.value = auth.apiBaseURL;
+    }
   } catch {
     desktopAuthResult.textContent = t("desktop.auth-unavailable");
   }
@@ -331,6 +413,7 @@ desktopSignInButton?.addEventListener("click", async () => {
   desktopAuthResult.textContent = t("desktop.opening-sign-in");
   try {
     const auth = await window.forgeflow.signIn(forgeflowAPIURL.value.trim());
+    if (auth.signedIn && cloneAPIURL && !cloneAPIURL.value) cloneAPIURL.value = auth.apiBaseURL;
     desktopAuthResult.textContent = auth.signedIn ? t("desktop.auth-ready", { url: auth.apiBaseURL }) : t("desktop.signin-incomplete");
   } catch (error) {
     desktopAuthResult.textContent = error instanceof Error ? error.message : t("desktop.signin-failed");
@@ -357,12 +440,92 @@ chooseRepositoryButton?.addEventListener("click", async () => {
     const selected = await window.forgeflow.chooseRepository();
     if (selected) {
       sourceRoot.value = selected;
+      persistLocalProjectSettings();
       if (worktreeStep) worktreeStep.open = true;
       refreshStepStates();
     }
   } finally {
     chooseRepositoryButton.disabled = false;
   }
+});
+
+authorizeGitHubCodeButton?.addEventListener("click", async () => {
+  const apiBaseURL = cloneAPIURL?.value.trim() || forgeflowAPIURL?.value.trim();
+  const projectID = cloneProjectID?.value.trim();
+  if (!apiBaseURL || !projectID || !cloneResult || !authorizeGitHubCodeButton) return;
+  authorizeGitHubCodeButton.disabled = true;
+  cloneResult.textContent = t("desktop.authorizing-code");
+  try {
+    await window.forgeflow.authorizeGitHubCode({ apiBaseURL, projectID });
+    cloneResult.textContent = t("desktop.code-authorized");
+  } catch (error) {
+    cloneResult.textContent = error instanceof Error ? error.message : t("desktop.code-authorization-failed");
+  } finally {
+    authorizeGitHubCodeButton.disabled = false;
+  }
+});
+
+cloneRepositoryButton?.addEventListener("click", async () => {
+  if (!sourceRoot?.value.trim() || !cloneAPIURL?.value.trim() || !cloneProjectID?.value.trim() || !cloneRepositoryID?.value.trim() || !cloneName?.value.trim() || !cloneResult || !cloneRepositoryButton) return;
+  cloneRepositoryButton.disabled = true;
+  cloneResult.textContent = t("desktop.cloning-remote");
+  try {
+    persistLocalProjectSettings();
+    const status = await window.forgeflow.cloneRepository({
+      root: sourceRoot.value.trim(),
+      name: cloneName.value.trim(),
+      apiBaseURL: cloneAPIURL.value.trim(),
+      projectID: cloneProjectID.value.trim(),
+      repositoryID: cloneRepositoryID.value.trim(),
+    });
+    sourceRoot.value = status.root;
+    persistLocalProjectSettings();
+    cloneResult.textContent = t("desktop.cloned-remote", { root: status.root });
+    localResult && (localResult.textContent = t("desktop.repo-ready"));
+    if (worktreeStep) worktreeStep.open = true;
+    refreshStepStates();
+  } catch (error) {
+    cloneResult.textContent = error instanceof Error ? error.message : t("desktop.clone-failed");
+  } finally {
+    cloneRepositoryButton.disabled = false;
+  }
+});
+
+findRepositoriesButton?.addEventListener("click", async () => {
+  if (!sourceRoot?.value.trim() || !localResult || !findRepositoriesButton) return;
+  findRepositoriesButton.disabled = true;
+  localResult.textContent = t("desktop.finding-projects");
+  try {
+    const repositories = await window.forgeflow.findRepositories(sourceRoot.value.trim());
+    if (!localProjectSelect || !localProjectPicker) return;
+    localProjectSelect.replaceChildren();
+    repositories.forEach((repository) => {
+      localProjectSelect.append(new Option(`${repository.root} · ${repository.branch || "detached"}`, repository.root));
+    });
+    localProjectPicker.hidden = repositories.length === 0;
+    if (repositories.length === 0) {
+      localResult.textContent = t("desktop.no-projects-found");
+      return;
+    }
+    const current = repositories.find((repository) => repository.root === sourceRoot.value.trim()) ?? repositories[0];
+    localProjectSelect.value = current.root;
+    sourceRoot.value = current.root;
+    persistLocalProjectSettings();
+    localResult.textContent = t("desktop.projects-found", { count: repositories.length });
+    if (worktreeStep) worktreeStep.open = true;
+    refreshStepStates();
+  } catch (error) {
+    localResult.textContent = error instanceof Error ? error.message : t("desktop.repo-failed");
+  } finally {
+    findRepositoriesButton.disabled = false;
+  }
+});
+
+localProjectSelect?.addEventListener("change", () => {
+  if (!sourceRoot || !localProjectSelect.value) return;
+  sourceRoot.value = localProjectSelect.value;
+  persistLocalProjectSettings();
+  refreshStepStates();
 });
 
 statusButton?.addEventListener("click", async () => {
@@ -373,6 +536,7 @@ statusButton?.addEventListener("click", async () => {
     const status = await window.forgeflow.repositoryStatus(
       sourceRoot.value.trim(),
     );
+    persistLocalProjectSettings();
     localResult.textContent = `${status.branch || "detached"} · ${status.clean ? t("desktop.clean") : t("desktop.local-changes")}`;
     if (worktreeStep) worktreeStep.open = true;
     refreshStepStates();
@@ -395,6 +559,7 @@ createButton?.addEventListener("click", async () => {
   createButton.disabled = true;
   localResult.textContent = t("desktop.creating-worktree");
   try {
+    persistLocalProjectSettings();
     const status = await window.forgeflow.createWorktree({
       sourceRoot: sourceRoot.value.trim(),
       name: worktreeName.value.trim(),
@@ -422,6 +587,7 @@ commitButton?.addEventListener("click", async () => {
   commitButton.disabled = true;
   localResult.textContent = t("desktop.committing");
   try {
+    persistLocalProjectSettings();
     const result = await window.forgeflow.commitWorktree({
       candidate: managedWorktree,
       message: commitMessage.value,
@@ -437,10 +603,17 @@ commitButton?.addEventListener("click", async () => {
 pushButton?.addEventListener("click", async () => {
   if (!managedWorktree || !localResult || !pushButton) return;
   if (!window.confirm(t("desktop.push-confirm"))) return;
+  const apiBaseURL = cloneAPIURL?.value.trim() || forgeflowAPIURL?.value.trim();
+  const projectID = cloneProjectID?.value.trim() || forgeflowProjectID?.value.trim();
+  const repositoryID = cloneRepositoryID?.value.trim();
+  if (!apiBaseURL || !projectID || !repositoryID) {
+    localResult.textContent = t("desktop.clone-settings-required");
+    return;
+  }
   pushButton.disabled = true;
   localResult.textContent = t("desktop.pushing");
   try {
-    const result = await window.forgeflow.pushWorktree(managedWorktree);
+    const result = await window.forgeflow.pushWorktree({ candidate: managedWorktree, apiBaseURL, projectID, repositoryID });
     localResult.textContent = t("desktop.pushed", { branch: result.branch });
   } catch (error) {
     localResult.textContent = error instanceof Error ? error.message : t("desktop.push-failed");
@@ -531,6 +704,7 @@ runButton?.addEventListener("click", async () => {
       prompt: agentPrompt.value,
       approved: agentApproved.checked,
       baseCommit: baseRef?.value.trim() || "HEAD",
+      branch: branchName?.value.trim() || "",
       server,
     });
     const outcome = result.cancelled ? t("desktop.cancelled") : result.timedOut ? t("desktop.timed-out") : t("desktop.exited", { code: result.code ?? result.signal ?? t("desktop.unknown") });

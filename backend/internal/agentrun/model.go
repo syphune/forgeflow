@@ -82,11 +82,11 @@ type CreateInput struct {
 }
 
 type ResultInput struct {
-	CommitSHA     string
-	PullRequestID string
-	Result        map[string]any
-	Error         *string
-	Metadata      map[string]any
+	CommitSHA     string         `json:"commit_sha,omitempty"`
+	PullRequestID string         `json:"pull_request_id,omitempty"`
+	Result        map[string]any `json:"result,omitempty"`
+	Error         *string        `json:"error,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 type TestCaseStatus string

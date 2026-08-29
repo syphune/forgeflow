@@ -18,6 +18,13 @@ type memoryState struct {
 	used                   bool
 }
 
+type userAuthorizationState struct {
+	userID, organizationID    string
+	codeVerifier, redirectURI string
+	expiresAt                 time.Time
+	used                      bool
+}
+
 type repositoryLink struct {
 	organizationID string
 	projectID      string
@@ -27,6 +34,9 @@ type repositoryLink struct {
 type MemoryStore struct {
 	mu            sync.Mutex
 	states        map[string]memoryState
+	userStates    map[string]userAuthorizationState
+	userIDs       map[string]int64
+	credentials   map[string]StoredUserCredential
 	installations map[string]Installation
 	repositories  map[string]Repository
 	links         map[repositoryLink]struct{}
@@ -37,7 +47,7 @@ type MemoryStore struct {
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{states: make(map[string]memoryState), installations: make(map[string]Installation), repositories: make(map[string]Repository), links: make(map[repositoryLink]struct{}), branches: make(map[string][]Branch), commits: make(map[string][]Commit), pullRequests: make(map[string][]PullRequest), ciRuns: make(map[string][]CIRun)}
+	return &MemoryStore{states: make(map[string]memoryState), userStates: make(map[string]userAuthorizationState), userIDs: make(map[string]int64), credentials: make(map[string]StoredUserCredential), installations: make(map[string]Installation), repositories: make(map[string]Repository), links: make(map[repositoryLink]struct{}), branches: make(map[string][]Branch), commits: make(map[string][]Commit), pullRequests: make(map[string][]PullRequest), ciRuns: make(map[string][]CIRun)}
 }
 
 func (s *MemoryStore) BeginInstallationState(_ context.Context, stateHash, userID, organizationID string, expiresAt time.Time) error {
@@ -57,6 +67,75 @@ func (s *MemoryStore) ConsumeInstallationState(_ context.Context, stateHash stri
 	state.used = true
 	s.states[stateHash] = state
 	return state.userID, state.organizationID, nil
+}
+
+func (s *MemoryStore) InstallationOrganization(_ context.Context, installationID int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, item := range s.installations {
+		if item.GitHubInstallationID == installationID {
+			organizationID, _, ok := strings.Cut(key, ":")
+			if ok && organizationID != "" {
+				return organizationID, nil
+			}
+		}
+	}
+	return "", apperr.New(apperr.CodeUnauthorized, 401, "GitHub installation is not linked", nil)
+}
+
+func (s *MemoryStore) BeginUserAuthorizationState(_ context.Context, stateHash, userID, organizationID, codeVerifier, redirectURI string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userStates[stateHash] = userAuthorizationState{userID: userID, organizationID: organizationID, codeVerifier: codeVerifier, redirectURI: redirectURI, expiresAt: expiresAt}
+	return nil
+}
+
+func (s *MemoryStore) ConsumeUserAuthorizationState(_ context.Context, stateHash string) (string, string, string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.userStates[stateHash]
+	if !ok || state.used || !state.expiresAt.After(time.Now().UTC()) {
+		return "", "", "", "", apperr.New(apperr.CodeUnauthorized, 401, "GitHub user authorization state is invalid or expired", nil)
+	}
+	state.used = true
+	s.userStates[stateHash] = state
+	return state.userID, state.organizationID, state.codeVerifier, state.redirectURI, nil
+}
+
+func (s *MemoryStore) GitHubUserID(_ context.Context, userID string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	githubUserID := s.userIDs[userID]
+	if githubUserID <= 0 {
+		return 0, apperr.New(apperr.CodeNotFound, 404, "Forgeflow user is not linked to GitHub", nil)
+	}
+	return githubUserID, nil
+}
+
+func (s *MemoryStore) UpsertUserCredential(_ context.Context, userID string, credential StoredUserCredential) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentials[userID] = credential
+	if credential.GitHubUserID > 0 {
+		s.userIDs[userID] = credential.GitHubUserID
+	}
+	return nil
+}
+
+func (s *MemoryStore) GetUserCredential(_ context.Context, userID string) (StoredUserCredential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	credential, ok := s.credentials[userID]
+	if !ok {
+		return StoredUserCredential{}, apperr.New(apperr.CodeNotFound, 404, "GitHub code authorization is not connected", nil)
+	}
+	return credential, nil
+}
+
+func (s *MemoryStore) SetGitHubUserID(userID string, githubUserID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userIDs[userID] = githubUserID
 }
 
 func (s *MemoryStore) UpsertInstallation(_ context.Context, organizationID string, installationID int64, accountLogin string) (Installation, error) {
@@ -233,12 +312,88 @@ func (s *MemoryStore) ListCIRuns(_ context.Context, organizationID, repositoryID
 	return append([]CIRun(nil), s.ciRuns[organizationID+":"+repositoryID]...), nil
 }
 
-func (s *MemoryStore) HasPullRequest(_ context.Context, _ string, _ string, _ string, _ string) (bool, error) {
+func (s *MemoryStore) HasPullRequest(ctx context.Context, organizationID, projectID, repositoryID, workItemKey string) (bool, error) {
+	_, found, err := s.GetPullRequest(ctx, organizationID, projectID, repositoryID, workItemKey, "")
+	return found, err
+}
+
+func (s *MemoryStore) HasSuccessfulCI(ctx context.Context, organizationID, projectID, repositoryID, workItemKey string) (bool, error) {
+	pr, found, err := s.GetPullRequest(ctx, organizationID, projectID, repositoryID, workItemKey, "")
+	if err != nil || !found {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.ciRuns[organizationID+":"+repositoryID] {
+		if item.SHA == pr.HeadSHA && strings.EqualFold(item.Conclusion, "success") {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
-func (s *MemoryStore) HasSuccessfulCI(_ context.Context, _ string, _ string, _ string, _ string) (bool, error) {
-	return false, nil
+func (s *MemoryStore) GetPullRequest(_ context.Context, organizationID, _ string, repositoryID, workItemKey, currentSHA string) (PullRequest, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := make([]PullRequest, 0)
+	if strings.TrimSpace(repositoryID) != "" {
+		items = append(items, s.pullRequests[organizationID+":"+repositoryID]...)
+	} else {
+		for key, values := range s.pullRequests {
+			if strings.HasPrefix(key, organizationID+":") {
+				items = append(items, values...)
+			}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].UpdatedAt.After(items[j].UpdatedAt) })
+	for _, item := range items {
+		if item.WorkItemID != workItemKey && !strings.Contains(item.Title+" "+item.Body, workItemKey) {
+			continue
+		}
+		if currentSHA != "" && item.HeadSHA != currentSHA {
+			continue
+		}
+		return item, true, nil
+	}
+	return PullRequest{}, false, nil
+}
+
+func (s *MemoryStore) HasRequiredCI(_ context.Context, organizationID, _ string, repositoryID, workItemKey, currentSHA string, required []string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if currentSHA == "" {
+		return false, nil
+	}
+	found := false
+	for _, item := range s.pullRequests[organizationID+":"+repositoryID] {
+		if (item.WorkItemID == workItemKey || strings.Contains(item.Title+" "+item.Body, workItemKey)) && item.HeadSHA == currentSHA {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	passed := make(map[string]bool)
+	for _, item := range s.ciRuns[organizationID+":"+repositoryID] {
+		if item.SHA == currentSHA && strings.EqualFold(item.Conclusion, "success") {
+			passed[strings.ToLower(strings.TrimSpace(item.CheckName))] = true
+		}
+	}
+	if len(required) == 0 {
+		for _, ok := range passed {
+			if ok {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	for _, check := range required {
+		if !passed[strings.ToLower(strings.TrimSpace(check))] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func formatInt(value int64) string {

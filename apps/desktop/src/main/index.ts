@@ -6,7 +6,9 @@ import { pathToFileURL } from "node:url";
 
 import {
   createManagedWorktree,
+  cloneRepository,
   commitWorktree,
+  findLocalRepositories,
   removeManagedWorktree,
   pushWorktree,
   repositoryDiff,
@@ -20,6 +22,7 @@ import {
   type AgentResult,
 } from "./agent/runner";
 import { assertRemoteExecutionInputs, createAgentRunClient } from "./server/agent-run";
+import { createGitHubCodeClient } from "./server/github-code";
 import { loadDesktopAuth, saveDesktopAuth, clearDesktopAuth } from "./auth/store";
 import { normalizeBaseURL } from "./server/agent-run";
 import { createDesktopState, reduceDesktopState, type AgentInputSnapshot, type DesktopEvent, type DesktopState } from "./agent/state";
@@ -175,6 +178,55 @@ async function signInWithGitHub(apiBaseURL: string): Promise<void> {
   });
 }
 
+async function authorizeGitHubCode(apiBaseURL: string, projectID: string): Promise<void> {
+  const baseURL = normalizeBaseURL(apiBaseURL);
+  const storedAuth = await loadDesktopAuth();
+  if (!storedAuth || storedAuth.apiBaseURL !== baseURL) {
+    throw new Error("Sign in to Forgeflow before authorizing GitHub code access");
+  }
+  const authorizationWindow = new BrowserWindow({
+    width: 720,
+    height: 760,
+    title: "Authorize GitHub code access",
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  authorizationWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+      if (!authorizationWindow.isDestroyed()) authorizationWindow.close();
+    };
+    authorizationWindow.on("closed", () => {
+      if (!settled) finish(new Error("GitHub code authorization was cancelled"));
+    });
+    authorizationWindow.webContents.on("did-navigate", async (_event, url) => {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return;
+      }
+      if (parsed.hostname === "github.com" || parsed.searchParams.get("github_code") !== "connected") return;
+      try {
+        const response = await fetch(`${baseURL}/api/v1/me`, {
+          headers: { Cookie: `forgeflow_session=${storedAuth.sessionCookie}` },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (response.ok) finish();
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error("GitHub code authorization failed"));
+      }
+    });
+    void authorizationWindow.loadURL(`${baseURL}/api/v1/integrations/github/user/start?project_id=${encodeURIComponent(projectID)}`).catch((error) =>
+      finish(error instanceof Error ? error : new Error("GitHub code authorization failed")),
+    );
+  });
+}
+
 ipcMain.handle("forgeflow:health", (event) => {
   if (!trustedSender(event)) throw new Error("untrusted IPC sender");
   return { ok: true };
@@ -206,6 +258,17 @@ ipcMain.handle("forgeflow:auth-sign-out", async (event) => {
   return { signedIn: false, apiBaseURL: "" };
 });
 
+ipcMain.handle("forgeflow:github-code-authorize", async (event, request: unknown) => {
+  if (!trustedSender(event)) throw new Error("untrusted IPC sender");
+  if (!request || typeof request !== "object") throw new Error("GitHub code authorization request is invalid");
+  const input = request as { apiBaseURL?: unknown; projectID?: unknown };
+  if (typeof input.apiBaseURL !== "string" || input.apiBaseURL.length > 2048 || typeof input.projectID !== "string" || input.projectID.length > 128 || !input.projectID.trim()) {
+    throw new Error("GitHub code authorization request is invalid");
+  }
+  await authorizeGitHubCode(input.apiBaseURL, input.projectID);
+  return { authorized: true };
+});
+
 ipcMain.handle("forgeflow:choose-repository", async (event) => {
   if (!trustedSender(event)) throw new Error("untrusted IPC sender");
   const result = await dialog.showOpenDialog({
@@ -220,6 +283,38 @@ ipcMain.handle("forgeflow:repository-status", async (event, root: string) => {
   if (typeof root !== "string" || root.length > 4096)
     throw new Error("repository path is invalid");
   return repositoryStatus(root);
+});
+
+ipcMain.handle("forgeflow:find-repositories", async (event, root: unknown) => {
+  if (!trustedSender(event)) throw new Error("untrusted IPC sender");
+  if (typeof root !== "string" || root.length > 4096)
+    throw new Error("code folder path is invalid");
+  return findLocalRepositories(root);
+});
+
+ipcMain.handle("forgeflow:clone-repository", async (event, request: unknown) => {
+  if (!trustedSender(event)) throw new Error("untrusted IPC sender");
+  if (!request || typeof request !== "object") throw new Error("clone request is invalid");
+  const input = request as { root?: unknown; name?: unknown; apiBaseURL?: unknown; projectID?: unknown; repositoryID?: unknown };
+  if (
+    typeof input.root !== "string" || input.root.length > 4096 ||
+    typeof input.name !== "string" || input.name.length > 128 ||
+    typeof input.apiBaseURL !== "string" || input.apiBaseURL.length > 2048 ||
+    typeof input.projectID !== "string" || input.projectID.length > 128 ||
+    typeof input.repositoryID !== "string" || input.repositoryID.length > 128
+  ) {
+    throw new Error("clone request is invalid");
+  }
+  const auth = await loadDesktopAuth();
+  if (!auth || auth.apiBaseURL !== normalizeBaseURL(input.apiBaseURL)) {
+    throw new Error("Sign in to Forgeflow before cloning");
+  }
+  const credential = await createGitHubCodeClient(auth, input.projectID).cloneCredential(input.repositoryID);
+  return cloneRepository(input.root, input.name, {
+    cloneURL: credential.clone_url,
+    username: credential.username,
+    token: credential.token,
+  });
 });
 
 ipcMain.handle("forgeflow:create-worktree", async (event, request: unknown) => {
@@ -262,11 +357,27 @@ ipcMain.handle("forgeflow:commit-worktree", async (event, request: unknown) => {
   return commitWorktree(await resolveManagedWorktree(managedRoot, input.candidate), input.message);
 });
 
-ipcMain.handle("forgeflow:push-worktree", async (event, candidate: unknown) => {
+ipcMain.handle("forgeflow:push-worktree", async (event, request: unknown) => {
   if (!trustedSender(event)) throw new Error("untrusted IPC sender");
-  if (typeof candidate !== "string" || candidate.length > 4096) throw new Error("worktree path is invalid");
+  if (!request || typeof request !== "object") throw new Error("push request is invalid");
+  const input = request as { candidate?: unknown; apiBaseURL?: unknown; projectID?: unknown; repositoryID?: unknown };
+  if (
+    typeof input.candidate !== "string" || input.candidate.length > 4096 ||
+    typeof input.apiBaseURL !== "string" || input.apiBaseURL.length > 2048 ||
+    typeof input.projectID !== "string" || input.projectID.length > 128 ||
+    typeof input.repositoryID !== "string" || input.repositoryID.length > 128
+  ) throw new Error("push request is invalid");
   const managedRoot = path.join(app.getPath("userData"), "worktrees");
-  return pushWorktree(await resolveManagedWorktree(managedRoot, candidate));
+  const auth = await loadDesktopAuth();
+  if (!auth || auth.apiBaseURL !== normalizeBaseURL(input.apiBaseURL)) {
+    throw new Error("Sign in to Forgeflow before pushing");
+  }
+  const credential = await createGitHubCodeClient(auth, input.projectID).cloneCredential(input.repositoryID);
+  return pushWorktree(await resolveManagedWorktree(managedRoot, input.candidate), {
+    cloneURL: credential.clone_url,
+    username: credential.username,
+    token: credential.token,
+  });
 });
 
 ipcMain.handle("forgeflow:repository-diff", async (event, candidate: unknown) => {
@@ -295,7 +406,8 @@ ipcMain.handle("forgeflow:agent-run", async (event, request: AgentRequest) => {
     !["codex", "claude"].includes(request.provider) ||
     typeof request.worktree !== "string" ||
     typeof request.prompt !== "string" ||
-    typeof request.approved !== "boolean"
+    typeof request.approved !== "boolean" ||
+    (request.branch !== undefined && (typeof request.branch !== "string" || request.branch.length > 200))
   ) {
     throw new Error("agent request is invalid");
   }
@@ -319,6 +431,7 @@ ipcMain.handle("forgeflow:agent-run", async (event, request: AgentRequest) => {
   const snapshot: AgentInputSnapshot = {
     repositoryID: request.repositoryID?.trim() ?? "",
     baseCommit: request.baseCommit?.trim() ?? "",
+    branch: request.branch?.trim() ?? "",
     worktree: safeWorktree,
     worktreeDiffHash:
       request.worktreeDiffHash?.trim() ||

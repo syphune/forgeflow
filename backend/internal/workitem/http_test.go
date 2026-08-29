@@ -1,6 +1,7 @@
 package workitem_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +9,51 @@ import (
 	"testing"
 
 	"github.com/forgeflow/forgeflow/backend/internal/app"
+	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
 )
+
+func TestHTTPCreateUsesAuthoritativeProjectScope(t *testing.T) {
+	application := app.New(1 << 20)
+	ctx := context.Background()
+	actor := identity.Actor{ID: "user-1", Capabilities: map[string]bool{"*": true}}
+	organization, err := application.Tenant.CreateOrganization(ctx, actor, "scope-test", "Scope Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.OrganizationID = organization.ID
+	workspaces, err := application.Tenant.Workspaces(ctx, actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 1 {
+		t.Fatalf("workspaces = %d, want 1", len(workspaces))
+	}
+	workspace := workspaces[0]
+	project, err := application.Tenant.CreateProject(ctx, actor, workspace.ID, "SCOPE", "Scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/work-items", strings.NewReader(`{"project_id":"`+project.ID+`","type":"TASK","title":"Scoped create"}`))
+	request.Header.Set("X-Organization-ID", organization.ID)
+	request.Header.Set("X-Actor-ID", actor.ID)
+	request.Header.Set("X-Project-ID", project.ID)
+	response := httptest.NewRecorder()
+	application.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var item struct {
+		Key         string `json:"key"`
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.Key != "SCOPE-1" || item.WorkspaceID != workspace.ID {
+		t.Fatalf("created scope = %#v, want key SCOPE-1 and workspace %s", item, workspace.ID)
+	}
+}
 
 func TestHTTPRejectsStatusPatch(t *testing.T) {
 	handler := app.New(1 << 20).Handler
@@ -161,6 +206,15 @@ func TestHTTPListsSpecificationVersionsWithinProject(t *testing.T) {
 	}
 	if err := json.Unmarshal(created.Body.Bytes(), &item); err != nil {
 		t.Fatal(err)
+	}
+	refine := httptest.NewRequest(http.MethodPost, "/api/v1/work-items/"+item.ID+"/transitions", strings.NewReader(`{"transition_key":"start_refining","expected_version":1}`))
+	refine.Header.Set("X-Organization-ID", "org-1")
+	refine.Header.Set("X-Actor-ID", "user-1")
+	refine.Header.Set("X-Project-ID", "project-1")
+	refined := httptest.NewRecorder()
+	handler.ServeHTTP(refined, refine)
+	if refined.Code != http.StatusOK {
+		t.Fatalf("refine status = %d, body = %s", refined.Code, refined.Body.String())
 	}
 	update := httptest.NewRequest(http.MethodPatch, "/api/v1/work-items/"+item.ID+"/specification", strings.NewReader(`{"summary":"Version one"}`))
 	update.Header.Set("X-Organization-ID", "org-1")

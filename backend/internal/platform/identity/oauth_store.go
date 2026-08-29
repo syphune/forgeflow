@@ -60,28 +60,4 @@ ON CONFLICT (provider, provider_subject) DO UPDATE SET user_id=EXCLUDED.user_id,
 	return userID, nil
 }
 
-func (s *PostgresOAuthStore) EnsureDefaultOrganization(ctx context.Context, userID string, githubUserID int64, login string) (string, error) {
-	exec := platformdb.ExecutorFrom(ctx, s.pool)
-	var organizationID string
-	if err := exec.QueryRow(ctx, `SELECT organization_id::text FROM organization_memberships WHERE user_id=$1 ORDER BY created_at LIMIT 1`, userID).Scan(&organizationID); err == nil {
-		return organizationID, nil
-	} else if err != pgx.ErrNoRows {
-		return "", fmt.Errorf("find user organization: %w", err)
-	}
-	slug := "github-" + strconv.FormatInt(githubUserID, 10)
-	if _, err := exec.Exec(ctx, `INSERT INTO organizations (slug, display_name) VALUES ($1,$2) ON CONFLICT (slug) DO NOTHING`, slug, strings.TrimSpace(login)+"'s Forgeflow"); err != nil {
-		return "", fmt.Errorf("create default organization: %w", err)
-	}
-	if err := exec.QueryRow(ctx, `SELECT id::text FROM organizations WHERE slug=$1`, slug).Scan(&organizationID); err != nil {
-		return "", fmt.Errorf("load default organization: %w", err)
-	}
-	if _, err := exec.Exec(ctx, `INSERT INTO organization_memberships (organization_id, user_id, role_key) VALUES ($1,$2,'owner') ON CONFLICT DO NOTHING`, organizationID, userID); err != nil {
-		return "", fmt.Errorf("create default membership: %w", err)
-	}
-	if _, err := exec.Exec(ctx, `INSERT INTO workspaces (organization_id, key, display_name) VALUES ($1,'MAIN','Main') ON CONFLICT (organization_id,key) DO NOTHING`, organizationID); err != nil {
-		return "", fmt.Errorf("create default workspace: %w", err)
-	}
-	return organizationID, nil
-}
-
 var _ OAuthStore = (*PostgresOAuthStore)(nil)

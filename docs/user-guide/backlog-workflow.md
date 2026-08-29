@@ -77,7 +77,7 @@ Khi surface repository đã được bật đầy đủ, thực hiện:
 7. Bấm **Link** trên repository muốn gắn vào Project.
 8. Kiểm tra trạng thái đã chuyển thành **Linked**.
 
-Sau khi link, repository đó trở thành nguồn context cho branch, file, symbol, snapshot và thông tin phục vụ Work Item/AgentRun. Link là theo Project và được kiểm tra tenant scope ở backend.
+Sau khi link, repository đó trở thành nguồn context cho branch, file, symbol và thông tin phục vụ Work Item/AgentRun. Link là theo Project và được kiểm tra tenant scope ở backend. MCP vẫn đọc code hiện tại trực tiếp từ GitHub; snapshot/index chỉ là dữ liệu phụ trợ của Forgeflow.
 
 ### 3.2. Kiểm tra sau khi link
 
@@ -152,6 +152,8 @@ Sau khi tạo, Forgeflow mở Work Item để bạn tiếp tục làm rõ defini
 - **Load more**: tải thêm khi danh sách có cursor.
 
 List/Board và filter được lưu trong URL. Bạn có thể copy URL cho đồng đội hoặc dùng Back/Forward mà không mất bộ lọc.
+
+Backlog mặc định gửi `exclude_terminal=true`, nên các item ở trạng thái terminal như `DONE` hoặc `CANCELLED` không chen vào danh sách việc đang xử lý. Chọn status terminal trong filter để tra cứu lại item đã hoàn tất.
 
 ### 4.3. More actions
 
@@ -241,7 +243,9 @@ Readiness là rule deterministic của server. AI có thể giúp draft, nhưng 
 
 UI mới có Definition editor cho summary, field theo loại item, reproduction steps, acceptance criteria, affected component và repository context. Nhóm thông tin chính của Bug được xếp theo chiều dọc để đọc theo thứ tự Problem → Expected → Actual; bằng chứng được gom thành thao tác compact dưới từng field. Sau mỗi lần save, nội dung mới trở thành `Needs verification`; hãy bấm **Mark human verified** sau khi kiểm tra rồi mới review version đó.
 
-Detail của Work Item được chia thành bốn tab: **Overview** cho context và handoff, **Definition** cho readiness/specification, **Activity** cho bình luận và **Runs** cho AgentRun. Dải workflow ở đầu detail luôn cho biết item đang ở bước nào; các transition vẫn do server kiểm tra.
+`RAW` chỉ là intake và không được sửa hoặc xác minh Definition. Hãy dùng transition refinement đã cấu hình trước; đây là lúc agent có thể đề xuất nội dung/test case và người dùng xác minh từng field/test case. Sau đó dùng transition review, rồi người có quyền review toàn bộ specification ở status review mà workflow quy định. Nếu bắt đầu autonomous từ `RAW`, server tự chọn transition refinement của Project trước khi tạo run.
+
+Detail của Work Item được chia thành năm tab: **Overview** cho context và handoff, **Definition** cho readiness/specification, **Activity** cho bình luận, **Branch plan** cho branch matrix/snapshot/PR sync và **Runs** cho AgentRun. Dải workflow ở đầu detail luôn cho biết item đang ở bước nào; các transition vẫn do server kiểm tra.
 
 ## 6. Đưa item qua Board
 
@@ -254,6 +258,8 @@ Board giúp theo dõi trạng thái, còn chi tiết definition vẫn nằm ở 
 3. Kéo card sang column khác khi workflow cho phép.
 4. Với card đang được focus, có thể dùng `Space`/`Enter` để grab/release, `ArrowLeft`/`ArrowRight` để chuyển column và `ArrowUp`/`ArrowDown` để đổi thứ tự trong column.
 5. Nếu board báo stale/conflict, bấm **Reload board** rồi kiểm tra lại item.
+
+Theo cách dùng giống Jira, card Done vẫn ở cột `DONE` trong thời gian cấu hình. Project manager có thể vào **Project settings → Board** và chọn thời hạn ẩn `Never`, `7`, `14`, `30` hoặc `60` ngày. Forgeflow ghi mốc `completed_at` khi transition vào terminal status; chỉnh sửa metadata sau đó không reset thời hạn. Item đã ẩn khỏi Board vẫn còn trong project và có thể tìm bằng filter status `DONE`/terminal.
 
 Tên status phụ thuộc workflow của từng Project. Một workflow minh họa có thể là `RAW → REFINING → READY → REVIEWING`, nhưng không được tự giả định mọi Project có đúng các status này. Hãy dùng action **Next action** và transition server cho phép.
 
@@ -285,6 +291,21 @@ Với **Default workflow**, các transition trực tiếp là:
 
 Từ `RAW`, `REFINING`, `REVIEW_REQUIRED`, `READY` và `IN_PROGRESS` có thể dùng action **Cancel** tương ứng. Không có transition mặc định ra khỏi `DONE` hoặc `CANCELLED`. Mọi mutation chuyển trạng thái đều cần capability `work_item.transition`, `transition_key` hợp lệ và `expected_version` hiện tại; version cũ sẽ bị từ chối để tránh ghi đè cập nhật của người khác.
 
+### 6.1. Release-gated workflow và risk policy
+
+`DONE` của **Default workflow** chỉ xác nhận development đã hoàn tất. Nếu Project cần tách release production, vào **Project settings → AI autonomous → Delivery policy**, cấu hình policy rồi bấm **Install release workflow**. Template này thêm:
+
+~~~text
+QA → READY_FOR_RELEASE → DEPLOYING → PRODUCTION_VERIFY → DONE
+                         ↘ ROLLED_BACK khi release/deploy/verify thất bại
+~~~
+
+`READY_FOR_RELEASE` re-check PR/head SHA hiện tại, từng required CI check, reviewer độc lập và regression case `REQUIRED` phải `PASS` trên đúng commit; PR cũng phải đã merge. `DEPLOYING` cần human có `release.approve`, deployment success rồi mới sang `PRODUCTION_VERIFY`; chỉ human có `production.verify` mới hoàn tất được `DONE`. Không có autonomous production deploy/approval.
+
+Delivery policy cho phép đặt risk `LOW`, `NORMAL`, `HIGH` hoặc `CRITICAL`, số approval tối thiểu, reviewer role và path rule. Path rule nhập theo từng dòng `glob | minimum approvals | roles`, ví dụ `payments/** | 2 | security_reviewer`; `**` khớp cả thư mục lồng nhau. Mỗi regression case trong Definition có `REQUIRED`, `OPTIONAL` hoặc `INFORMATIONAL`; chỉ `REQUIRED` chặn release.
+
+Hotfix phải theo branch plan production SHA → PR production → deploy/verify → sync-backport về development. Khi plan yêu cầu sync, transition terminal vẫn bị chặn cho đến khi webhook ghi nhận PR sync đã `MERGED`. Bug phát hiện sau `DONE` nên tạo Work Item mới liên kết với item cũ, không reopen tùy tiện; lịch sử Definition of Done vẫn bất biến.
+
 ## 7. Từ READY sang Agent hoặc code thủ công
 
 Chỉ chạy AgentRun khi:
@@ -305,6 +326,8 @@ Trong **Definition**, thêm các **Regression test cases** với scenario và ex
 - ghi **Review note** chung nếu cần truyền thêm bối cảnh cho người/agent tiếp theo;
 - bấm **Prepare follow-up** để hệ thống tạo prompt và scope chỉ gồm các case chưa đạt.
 
+Khi tạo case, chọn `REQUIRED` cho gate phải chứng minh trước release; dùng `OPTIONAL` cho coverage bổ sung và `INFORMATIONAL` cho ghi nhận không chặn. Case required chưa chạy, `FAIL`, `BLOCKED` hoặc thiếu evidence trên đúng commit sẽ không qua gate release.
+
 Kết quả được lưu theo từng run, không bị ghi đè khi cập nhật một case. Case đã PASS vẫn được giữ lại và không nằm trong scope follow-up; reviewer không phải kiểm thử lại hoặc agent không phải chạy lại toàn bộ. Nếu QA phát hiện lỗi, dùng transition **QA failed** để trả item về `IN_PROGRESS`, sau đó tạo follow-up từ checklist.
 
 Ở Desktop Agent Runner, luồng được chia thành bốn bước có thể mở/đóng:
@@ -317,6 +340,8 @@ Kết quả được lưu theo từng run, không bị ghi đè khi cập nhật
 Mỗi bước hiển thị trạng thái `Needs input`, `Complete the previous step`, `Ready` hoặc `Running`. Lỗi giữ nguyên input để người dùng sửa hoặc retry; không tự xoá worktree hay prompt.
 
 Approval gắn với repository, base commit, diff/context, prompt, specification version, agent configuration và execution policy. Nếu các input này đổi sau approval, cần review/approve lại. Forgeflow không auto-merge.
+
+Server runner dùng Docker với workspace riêng, root filesystem read-only, user không phải root, drop capabilities, `no-new-privileges`, `/tmp` `noexec,nosuid`, CPU/RAM/PID/timeout bounded và secret redaction. Network mặc định `none`; chỉ bật `bridge` trong môi trường đã có egress allowlist nếu provider cần gọi API. Image dùng version cố định hoặc digest, không dùng `latest`; `FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT` phải là đường dẫn tuyệt đối mà Docker daemon nhìn thấy. Docker socket là quyền gần tương đương root, nên production runner cần host/VM hoặc daemon/rootless boundary riêng.
 
 ### 7.1. Chạy AI Autonomous từ mô tả của manager/leader
 
@@ -358,32 +383,117 @@ Khi test hoặc reviewer phát hiện lỗi:
 
 ### 7.2. Dùng MCP từ Codex, Claude hoặc Cursor
 
-Với team dùng server chung, vào **Developer → Kết nối MCP**, chọn project và client rồi bấm **Tạo kết nối**. Forgeflow sinh short-lived token và cấu hình MCP; token chỉ hiện một lần. Codex có thể kết nối trực tiếp tới Streamable HTTP, không cần mỗi người tự build bridge.
+MCP là “cầu nối” để Codex, Claude hoặc Cursor làm việc với Forgeflow. Kết nối này có phạm vi **toàn organization**, không bị khóa vào một project duy nhất. Vì vậy bạn có thể dùng cùng một kết nối cho nhiều project, nhưng agent phải biết chính xác project nào trước khi đọc hoặc thay đổi dữ liệu.
 
-MCP client có thể gọi các tool `autonomous.start`, `autonomous.get`, `autonomous.resume`, `autonomous.retry`, `autonomous.add_feedback` và `autonomous.record_test_results`.
+Điều quan trọng nhất:
 
-Bridge vẫn được hỗ trợ cho client chỉ nhận stdio hoặc môi trường local đặc biệt.
+- Nếu bạn chưa nói rõ project, MCP phải liệt kê project rồi hỏi lại; không được tự đoán.
+- Repository phải được **Connect GitHub** và **Link to project** trước khi dùng.
+- Dữ liệu repository được lấy từ repository GitHub đã link, trên default branch; MCP không đọc thư mục local của máy bạn và không dùng snapshot cũ làm nguồn code.
+- Repository chưa link hoặc tài khoản không có quyền sẽ bị từ chối.
 
-Trong local development dùng database Docker, có thể chạy MCP trực tiếp với development actor:
+#### Bước 1 — Chuẩn bị GitHub repository
+
+1. Mở đúng **Project** trong Forgeflow.
+2. Vào **Repositories** → **Connect GitHub**.
+3. Cài hoặc cập nhật Forgeflow GitHub App, rồi chọn account/organization và repository cần dùng.
+4. Bấm **Link to project** trên repository đó.
+5. Kiểm tra card đã hiện **Linked**.
+
+Nếu Project có nhiều repository, hãy ghi rõ repository chính trong Work Item. MCP không tự chọn một repository chỉ vì tên gần giống.
+
+#### Bước 2 — Kết nối MCP
+
+1. Vào **Developer → Kết nối MCP**.
+2. Chọn **Codex**, **Cursor** hoặc **Claude**.
+3. Bấm **Tạo kết nối**.
+4. Copy token và cấu hình được sinh ra. Token chỉ hiện một lần, không commit token vào repository.
+
+Với Codex, cấu hình thường có dạng:
 
 ~~~sh
-cd /absolute/path/to/Forgeflow
-make mcp-bridge
-cd backend && go build -o ./bin/forgeflow-mcp ./cmd/mcp
+export FORGEFLOW_MCP_TOKEN='TOKEN_DUOC_CAP_MOT_LAN'
+codex mcp add forgeflow \
+  --url "https://forgeflow.example.com/api/v1/mcp" \
+  --bearer-token-env-var FORGEFLOW_MCP_TOKEN
 ~~~
 
-Trong MCP client, đăng ký command `backend/bin/forgeflow-mcp` với các biến `DATABASE_URL`, `FORGEFLOW_DEV_AUTH=true`, `FORGEFLOW_MCP_ORGANIZATION_ID`, `FORGEFLOW_MCP_PROJECT_ID` và `FORGEFLOW_MCP_ACTOR_ID`. Cách này chỉ dành cho local; production phải dùng `forgeflow-mcp-bridge` với short-lived PAT.
+Khi dùng Docker local, endpoint là `http://localhost:18080/api/v1/mcp`. Codex có thể kết nối trực tiếp tới endpoint này; bridge stdio chỉ cần khi client hoặc môi trường không hỗ trợ Streamable HTTP.
 
-Bạn có thể ra lệnh tự nhiên cho agent như:
+#### Bước 3 — Ra lệnh cho agent
+
+Bạn không cần tự nhớ tên tool. Hãy nói rõ project, repository và việc cần làm.
+
+Ví dụ khi chưa nói rõ project:
 
 ~~~text
-Tạo một autonomous run cho Project hiện tại từ bug này: khi in hóa đơn
-không ra phiếu. Gắn repository hiện tại, mô tả expected behavior, thêm
-regression cases, chờ human review nếu specification chưa đủ, rồi chỉ retry
-các test case còn fail sau khi reviewer ghi chú.
+Tìm nơi xử lý đăng nhập GitHub.
 ~~~
 
-MCP không tự biến AI proposal thành sự thật đã xác minh, không tự bỏ qua specification review và không tự approve production deployment.
+MCP phải hỏi lại:
+
+~~~text
+Bạn muốn thao tác trong project nào? Tôi thấy: APP, BILLING và WEB.
+~~~
+
+Ví dụ đọc code từ GitHub:
+
+~~~text
+Trong project BILLING, dùng repository billing-api. Hãy tìm các file xử lý
+việc tạo hóa đơn PDF, sau đó đọc file phù hợp và cho tôi biết luồng xử lý.
+~~~
+
+Ví dụ tìm lỗi:
+
+~~~text
+Trong project APP và repository forgeflow-web, tìm chuỗi "stale project"
+trên default branch, đọc các file liên quan và đề xuất nguyên nhân. Chỉ đọc,
+chưa tạo PR.
+~~~
+
+Ví dụ xem thông tin repository:
+
+~~~text
+Cho tôi biết default branch, các commit gần đây và pull request liên quan
+của repository billing-api trong project BILLING.
+~~~
+
+#### Các thao tác MCP hỗ trợ
+
+| Bạn muốn làm | MCP thực hiện |
+| --- | --- |
+| Xem thông tin repository | Đọc repository đã link từ GitHub |
+| Xem cây thư mục | Đọc tree hiện tại trên default branch |
+| Tìm code | Tìm trực tiếp trong tree/file của GitHub |
+| Đọc file | Đọc file giới hạn kích thước từ GitHub |
+| Tìm symbol hoặc file liên quan | Trả về candidate từ nội dung GitHub |
+| Xem commit, pull request | Đọc lịch sử GitHub hiện tại |
+| Tạo branch, sửa code, commit, push hoặc PR | Dùng Desktop Agent Runner trên project local; MCP không ghi trực tiếp vào GitHub |
+| Chạy agent server | Chỉ dùng AgentRun/Autonomous khi project policy bật rõ server execution |
+
+Desktop Agent Runner tạo branch `forgeflow/*` trong worktree được quản lý. Commit phải có subject theo Conventional Commits; sau khi review diff, người dùng mới commit hoặc push.
+
+#### Nếu muốn agent sửa code
+
+Hãy dùng AgentRun hoặc Autonomous sau khi Work Item đã có repository và specification đủ rõ:
+
+~~~text
+Tạo autonomous run cho bug BILLING-42 trong project BILLING. Dùng repository
+billing-api, kiểm tra lỗi tạo invoice PDF, chạy các regression case liên quan,
+dừng để tôi review specification nếu còn thiếu, và chỉ retry các case chưa đạt.
+~~~
+
+Nếu specification chưa được human review, run sẽ dừng ở `WAITING_SPEC_REVIEW`. MCP không tự biến AI proposal thành sự thật đã xác minh và không tự approve production deployment.
+
+#### Lỗi thường gặp
+
+| Thông báo | Cách xử lý |
+| --- | --- |
+| `project_id is required` | Nói rõ tên project hoặc yêu cầu MCP liệt kê project trước |
+| `repository is not linked to this project` | Vào **Repositories**, Connect GitHub và Link repository vào đúng Project |
+| Không thấy repository | Kiểm tra GitHub App đã được cài đúng account, repository đã được chọn và bấm Refresh |
+| `forbidden` | Kiểm tra role/capability và token MCP |
+| Không thấy thay đổi mới nhất | MCP đọc default branch trên GitHub; kiểm tra project local, diff và trạng thái push trong Desktop Runner |
 
 ## 8. Các state UX chung
 
@@ -456,7 +566,7 @@ Các màn hình **Planning**, **Inbox**, **Repositories**, **Settings** và **De
 - [ ] Human đã review specification version hiện tại.
 - [ ] Biết transition tiếp theo và điều kiện để chuyển.
 
-## 11. Checklist trước khi chạy Agent
+## 12. Checklist trước khi chạy Agent
 
 - [ ] Work Item đã qua readiness gate.
 - [ ] AgentRun đã được tạo và approved nếu dùng flow tích hợp.

@@ -46,9 +46,9 @@ type CreateInput struct {
 }
 
 type UpdateInput struct {
-	DisplayName *string
-	Options     *[]string
-	Required    *bool
+	DisplayName *string   `json:"display_name"`
+	Options     *[]string `json:"options"`
+	Required    *bool     `json:"required"`
 }
 
 type TypedValue struct {

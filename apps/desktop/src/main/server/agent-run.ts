@@ -36,6 +36,9 @@ export function assertRemoteExecutionInputs(snapshot: AgentInputSnapshot, remote
   if (run.base_sha?.trim() && snapshot.baseCommit && snapshot.baseCommit !== "HEAD" && run.base_sha.trim() !== snapshot.baseCommit) {
     throw new Error("The approved AgentRun base commit does not match the desktop worktree");
   }
+  if (run.branch?.trim() && snapshot.branch?.trim() && run.branch.trim() !== snapshot.branch.trim()) {
+    throw new Error("The approved AgentRun branch does not match the desktop worktree");
+  }
   const inputs = run.execution_inputs ?? {};
   if (typeof inputs.prompt === "string" && inputs.prompt.trim() !== snapshot.prompt.trim()) {
     throw new Error("The approved AgentRun prompt changed; review and approve the new inputs");

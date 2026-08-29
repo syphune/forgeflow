@@ -10,11 +10,12 @@ FROM node:22-bookworm-slim
 
 WORKDIR /src
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates git \
+    && apt-get install --no-install-recommends -y ca-certificates git docker.io \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/forgeflow-runner /usr/local/bin/forgeflow-runner
 RUN npm install --global @openai/codex @anthropic-ai/claude-code \
-    && useradd --create-home --shell /usr/sbin/nologin forgeflow
+    && groupadd --system docker \
+    && useradd --create-home --shell /usr/sbin/nologin --groups docker forgeflow
 
 RUN mkdir -p /var/lib/forgeflow/workspaces \
     && chown -R forgeflow:forgeflow /var/lib/forgeflow

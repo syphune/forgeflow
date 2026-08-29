@@ -94,7 +94,7 @@ func scanRun(row rowScanner) (Run, error) {
 }
 
 func (s *PostgresStore) loadApproval(ctx context.Context, organizationID, runID string, run *Run) error {
-	if err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_run_approvals WHERE organization_id=$1 AND run_id=$2 AND action='approve')`, organizationID, runID).Scan(&run.Approved); err != nil {
+	if err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM agent_run_approvals WHERE organization_id=$1::uuid AND run_id=$2::uuid AND action='approve')`, organizationID, runID).Scan(&run.Approved); err != nil {
 		return fmt.Errorf("load AgentRun approval: %w", err)
 	}
 	return nil
@@ -142,7 +142,7 @@ func (s *PostgresStore) Get(ctx context.Context, organizationID, projectID, id s
 }
 
 func (s *PostgresStore) getRun(ctx context.Context, organizationID, projectID, id string) (Run, error) {
-	result, err := scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, runSelect+` WHERE organization_id=$1 AND ($2='' OR project_id=$2) AND id=$3`, organizationID, projectID, id))
+	result, err := scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, runSelect+` WHERE organization_id=$1::uuid AND ($2='' OR project_id=$2::uuid) AND id=$3::uuid`, organizationID, projectID, id))
 	if err == pgx.ErrNoRows {
 		return Run{}, apperr.New(apperr.CodeNotFound, 404, "AgentRun not found", nil)
 	}
@@ -156,7 +156,7 @@ func (s *PostgresStore) getRun(ctx context.Context, organizationID, projectID, i
 }
 
 func (s *PostgresStore) List(ctx context.Context, organizationID, projectID, workItemID string) ([]Run, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, runSelect+` WHERE organization_id=$1 AND project_id=$2 AND ($3='' OR work_item_id=$3) ORDER BY created_at DESC, id DESC`, organizationID, projectID, workItemID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, runSelect+` WHERE organization_id=$1::uuid AND project_id=$2::uuid AND ($3='' OR work_item_id=$3::uuid) ORDER BY created_at DESC, id DESC`, organizationID, projectID, workItemID)
 	if err != nil {
 		return nil, fmt.Errorf("list AgentRuns: %w", err)
 	}
@@ -176,7 +176,7 @@ func (s *PostgresStore) List(ctx context.Context, organizationID, projectID, wor
 }
 
 func (s *PostgresStore) Approve(ctx context.Context, organizationID, runID, approverID, action string) error {
-	_, err := platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `INSERT INTO agent_run_approvals (organization_id,run_id,approver_id,action) VALUES ($1,$2,$3,$4) ON CONFLICT (run_id,action) DO NOTHING`, organizationID, runID, approverID, action)
+	_, err := platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `INSERT INTO agent_run_approvals (organization_id,run_id,approver_id,action) VALUES ($1::uuid,$2::uuid,$3::uuid,$4) ON CONFLICT (run_id,action) DO NOTHING`, organizationID, runID, approverID, action)
 	if err != nil {
 		return fmt.Errorf("approve AgentRun: %w", err)
 	}
@@ -184,7 +184,7 @@ func (s *PostgresStore) Approve(ctx context.Context, organizationID, runID, appr
 }
 
 func (s *PostgresStore) Transition(ctx context.Context, organizationID, runID string, from, to Status) (Run, error) {
-	result, err := scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE agent_runs SET status=$1, started_at=CASE WHEN $1='PREPARING' AND ($4='INTERRUPTED' OR started_at IS NULL) THEN now() ELSE started_at END, finished_at=CASE WHEN $1 IN ('COMPLETED','FAILED','CANCELLED') THEN now() WHEN $1='PREPARING' AND $4='INTERRUPTED' THEN NULL ELSE finished_at END, last_heartbeat_at=CASE WHEN $1='PREPARING' AND $4='INTERRUPTED' THEN NULL ELSE last_heartbeat_at END, interruption_reason=CASE WHEN $1='PREPARING' AND $4='INTERRUPTED' THEN '' ELSE interruption_reason END WHERE organization_id=$2 AND id=$3 AND status=$4 RETURNING `+runColumns, to, organizationID, runID, from))
+	result, err := scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE agent_runs SET status=$1, started_at=CASE WHEN $1='PREPARING' AND ($4='INTERRUPTED' OR started_at IS NULL) THEN now() ELSE started_at END, finished_at=CASE WHEN $1 IN ('COMPLETED','FAILED','CANCELLED') THEN now() WHEN $1='PREPARING' AND $4='INTERRUPTED' THEN NULL ELSE finished_at END, last_heartbeat_at=CASE WHEN $1='PREPARING' AND $4='INTERRUPTED' THEN NULL ELSE last_heartbeat_at END, interruption_reason=CASE WHEN $1='PREPARING' AND $4='INTERRUPTED' THEN '' ELSE interruption_reason END WHERE organization_id=$2::uuid AND id=$3::uuid AND status=$4 RETURNING `+runColumns, to, organizationID, runID, from))
 	if err == pgx.ErrNoRows {
 		return Run{}, apperr.New(apperr.CodeConflict, 409, "AgentRun state is stale or transition is invalid", nil)
 	}
@@ -198,7 +198,7 @@ func (s *PostgresStore) Transition(ctx context.Context, organizationID, runID st
 }
 
 func (s *PostgresStore) Heartbeat(ctx context.Context, organizationID, runID string, now time.Time) (Run, error) {
-	result, err := scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE agent_runs SET last_heartbeat_at=$3 WHERE organization_id=$1 AND id=$2 AND status IN ('PREPARING','PLANNING','INVESTIGATING','IMPLEMENTING','TESTING','REVIEWING') RETURNING `+runColumns, organizationID, runID, now.UTC()))
+	result, err := scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE agent_runs SET last_heartbeat_at=$3 WHERE organization_id=$1::uuid AND id=$2::uuid AND status IN ('PREPARING','PLANNING','INVESTIGATING','IMPLEMENTING','TESTING','REVIEWING') RETURNING `+runColumns, organizationID, runID, now.UTC()))
 	if err == pgx.ErrNoRows {
 		return Run{}, apperr.New(apperr.CodeConflict, 409, "AgentRun is not running", nil)
 	}
@@ -251,7 +251,7 @@ SET commit_sha=CASE WHEN NULLIF($3,'') IS NULL THEN commit_sha ELSE $3 END,
     result=COALESCE($5::jsonb,result),
     error=COALESCE($6,error),
     metadata=metadata || COALESCE($7::jsonb,'{}'::jsonb)
-WHERE organization_id=$1 AND id=$2
+WHERE organization_id=$1::uuid AND id=$2::uuid
 `, organizationID, runID, input.CommitSHA, input.PullRequestID, resultJSON, input.Error, metadataJSON)
 	if err != nil {
 		return Run{}, fmt.Errorf("update AgentRun result: %w", err)
@@ -267,7 +267,7 @@ func (s *PostgresStore) UpdateTestResults(ctx context.Context, organizationID, r
 	_, err = platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `
 UPDATE agent_runs
 SET result=COALESCE(result,'{}'::jsonb) || jsonb_build_object('test_cases',$3::jsonb,'test_review_note',$4::text)
-WHERE organization_id=$1 AND id=$2
+WHERE organization_id=$1::uuid AND id=$2::uuid
 `, organizationID, runID, casesJSON, results.ReviewNote)
 	if err != nil {
 		return Run{}, fmt.Errorf("update AgentRun test results: %w", err)
@@ -283,7 +283,7 @@ SET pull_request_id=$5::uuid,
     metadata=metadata || jsonb_build_object('github_pull_request_synced_at', now())
 WHERE id=(
     SELECT id FROM agent_runs
-    WHERE organization_id=$1 AND repository_id=$2 AND work_item_id=$3
+    WHERE organization_id=$1::uuid AND repository_id=$2::uuid AND work_item_id=$3::uuid
       AND ($6='' OR branch=$6)
     ORDER BY created_at DESC, id DESC
     LIMIT 1
@@ -299,13 +299,13 @@ func (s *PostgresStore) UpdateCIRun(ctx context.Context, organizationID, reposit
 	_, err := platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `
 UPDATE agent_runs
 SET metadata=metadata || jsonb_build_object(
-    'ci_external_id', $4,
-    'ci_status', $5,
-    'ci_conclusion', $6,
-    'ci_url', $7,
+    'ci_external_id', $4::text,
+    'ci_status', $5::text,
+    'ci_conclusion', $6::text,
+    'ci_url', $7::text,
     'ci_updated_at', now()
 )
-WHERE organization_id=$1 AND repository_id=$2 AND commit_sha=$3
+WHERE organization_id=$1::uuid AND repository_id=$2::uuid AND commit_sha=$3
 `, organizationID, repositoryID, commitSHA, externalID, status, conclusion, url)
 	if err != nil {
 		return fmt.Errorf("update AgentRun CI result: %w", err)
@@ -324,7 +324,7 @@ func (s *PostgresStore) AddStep(ctx context.Context, organizationID, runID strin
 		}
 		step.ID = id
 	}
-	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO agent_run_steps (id,organization_id,run_id,sequence,phase,status,summary,files_read,files_modified,commands,tests,metadata,started_at,finished_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14 WHERE EXISTS (SELECT 1 FROM agent_runs WHERE organization_id=$2 AND id=$3) RETURNING id::text,run_id::text,sequence,phase,status,summary,files_read,files_modified,commands,tests,metadata,started_at,finished_at`, step.ID, organizationID, runID, step.Sequence, step.Phase, step.Status, step.Summary, step.FilesRead, step.FilesModified, commands, tests, metadata, step.StartedAt, step.FinishedAt).Scan(&step.ID, &step.RunID, &step.Sequence, &step.Phase, &step.Status, &step.Summary, &step.FilesRead, &step.FilesModified, &commands, &tests, &metadata, &step.StartedAt, &step.FinishedAt)
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO agent_run_steps (id,organization_id,run_id,sequence,phase,status,summary,files_read,files_modified,commands,tests,metadata,started_at,finished_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14 WHERE EXISTS (SELECT 1 FROM agent_runs WHERE organization_id=$2::uuid AND id=$3::uuid) RETURNING id::text,run_id::text,sequence,phase,status,summary,files_read,files_modified,commands,tests,metadata,started_at,finished_at`, step.ID, organizationID, runID, step.Sequence, step.Phase, step.Status, step.Summary, step.FilesRead, step.FilesModified, commands, tests, metadata, step.StartedAt, step.FinishedAt).Scan(&step.ID, &step.RunID, &step.Sequence, &step.Phase, &step.Status, &step.Summary, &step.FilesRead, &step.FilesModified, &commands, &tests, &metadata, &step.StartedAt, &step.FinishedAt)
 	if err == pgx.ErrNoRows {
 		return Step{}, apperr.New(apperr.CodeNotFound, 404, "AgentRun not found", nil)
 	}
@@ -346,7 +346,7 @@ func (s *PostgresStore) AddArtifact(ctx context.Context, organizationID, runID s
 		artifact.ID = id
 	}
 	metadata, _ := json.Marshal(artifact.Metadata)
-	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO agent_run_artifacts (id,organization_id,run_id,artifact_type,name,content_hash,size_bytes,object_key,metadata) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM agent_runs WHERE organization_id=$2 AND id=$3) RETURNING id::text,run_id::text,artifact_type,name,content_hash,size_bytes,object_key,metadata,created_at`, artifact.ID, organizationID, runID, artifact.ArtifactType, artifact.Name, artifact.ContentHash, artifact.SizeBytes, artifact.ObjectKey, metadata).Scan(&artifact.ID, &artifact.RunID, &artifact.ArtifactType, &artifact.Name, &artifact.ContentHash, &artifact.SizeBytes, &artifact.ObjectKey, &metadata, &artifact.CreatedAt)
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO agent_run_artifacts (id,organization_id,run_id,artifact_type,name,content_hash,size_bytes,object_key,metadata) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM agent_runs WHERE organization_id=$2::uuid AND id=$3::uuid) RETURNING id::text,run_id::text,artifact_type,name,content_hash,size_bytes,object_key,metadata,created_at`, artifact.ID, organizationID, runID, artifact.ArtifactType, artifact.Name, artifact.ContentHash, artifact.SizeBytes, artifact.ObjectKey, metadata).Scan(&artifact.ID, &artifact.RunID, &artifact.ArtifactType, &artifact.Name, &artifact.ContentHash, &artifact.SizeBytes, &artifact.ObjectKey, &metadata, &artifact.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return Artifact{}, apperr.New(apperr.CodeNotFound, 404, "AgentRun not found", nil)
 	}
@@ -358,7 +358,7 @@ func (s *PostgresStore) AddArtifact(ctx context.Context, organizationID, runID s
 }
 
 func (s *PostgresStore) listSteps(ctx context.Context, organizationID, runID string) ([]Step, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text,run_id::text,sequence,phase,status,summary,files_read,files_modified,commands,tests,metadata,started_at,finished_at FROM agent_run_steps WHERE organization_id=$1 AND run_id=$2 ORDER BY sequence`, organizationID, runID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text,run_id::text,sequence,phase,status,summary,files_read,files_modified,commands,tests,metadata,started_at,finished_at FROM agent_run_steps WHERE organization_id=$1::uuid AND run_id=$2::uuid ORDER BY sequence`, organizationID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("list AgentRun steps: %w", err)
 	}
@@ -378,7 +378,7 @@ func (s *PostgresStore) listSteps(ctx context.Context, organizationID, runID str
 	return result, rows.Err()
 }
 func (s *PostgresStore) listArtifacts(ctx context.Context, organizationID, runID string) ([]Artifact, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text,run_id::text,artifact_type,name,content_hash,size_bytes,object_key,metadata,created_at FROM agent_run_artifacts WHERE organization_id=$1 AND run_id=$2 ORDER BY created_at,id`, organizationID, runID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text,run_id::text,artifact_type,name,content_hash,size_bytes,object_key,metadata,created_at FROM agent_run_artifacts WHERE organization_id=$1::uuid AND run_id=$2::uuid ORDER BY created_at,id`, organizationID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("list AgentRun artifacts: %w", err)
 	}

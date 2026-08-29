@@ -49,6 +49,8 @@ func main() {
 		}, githubintegration.AppConfig{
 			ID: cfg.GitHubAppID, Slug: cfg.GitHubAppSlug, PrivateKey: cfg.GitHubAppPrivateKey,
 			CallbackURL: cfg.GitHubAppCallbackURL, WebBaseURL: cfg.WebBaseURL,
+			ClientID: cfg.GitHubAppClientID, ClientSecret: cfg.GitHubAppClientSecret,
+			UserCallbackURL: cfg.GitHubAppUserCallbackURL, TokenEncryptionKey: cfg.GitHubAppTokenEncryptionKey,
 		})
 		cancel()
 		if err != nil {

@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"sort"
+	"strings"
 )
 
 const (
@@ -21,6 +22,7 @@ const (
 	CapabilitySprintManage         = "sprint.manage"
 	CapabilityRepositoryRead       = "repository.read"
 	CapabilityRepositoryManage     = "repository.manage"
+	CapabilityBranchManage         = "branch.manage"
 	CapabilitySpecificationPropose = "specification.propose"
 	CapabilitySpecificationVerify  = "specification.verify"
 	CapabilityAgentExecute         = "agent.execute"
@@ -31,6 +33,9 @@ const (
 	CapabilityAIPolicyManage       = "ai_policy.manage"
 	CapabilityEnvironmentManage    = "environment.manage"
 	CapabilityDeploymentApprove    = "deployment.approve"
+	CapabilitySecurityReview       = "security.review"
+	CapabilityReleaseApprove       = "release.approve"
+	CapabilityProductionVerify     = "production.verify"
 )
 
 var capabilityKeys = []string{
@@ -42,6 +47,9 @@ var capabilityKeys = []string{
 	CapabilityAIPolicyManage,
 	CapabilityDeploymentApprove,
 	CapabilityEnvironmentManage,
+	CapabilityProductionVerify,
+	CapabilityReleaseApprove,
+	CapabilitySecurityReview,
 	CapabilityCommentCreate,
 	CapabilityOrganizationManage,
 	CapabilityOrganizationRead,
@@ -49,6 +57,7 @@ var capabilityKeys = []string{
 	CapabilityProjectRead,
 	CapabilityRepositoryManage,
 	CapabilityRepositoryRead,
+	CapabilityBranchManage,
 	CapabilitySpecificationPropose,
 	CapabilitySpecificationVerify,
 	CapabilitySprintManage,
@@ -64,9 +73,15 @@ var capabilityKeys = []string{
 type Actor struct {
 	Type           string
 	ID             string
+	Login          string
+	DisplayName    string
 	OrganizationID string
 	Source         string
 	Capabilities   map[string]bool
+	// ProjectCapabilities preserves the effective role for each project when
+	// authentication is unscoped. It is intentionally not folded into
+	// Capabilities, which would grant the union of project roles.
+	ProjectCapabilities map[string]map[string]bool
 }
 
 func (a Actor) Has(capability string) bool {
@@ -74,6 +89,16 @@ func (a Actor) Has(capability string) bool {
 		return false
 	}
 	return a.Capabilities["*"] || a.Capabilities[capability]
+}
+
+func (a Actor) ForProject(projectID string) Actor {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" || a.ProjectCapabilities == nil {
+		return a
+	}
+	scoped := a
+	scoped.Capabilities = a.ProjectCapabilities[projectID]
+	return scoped
 }
 
 func (a Actor) SortedCapabilities() []string {

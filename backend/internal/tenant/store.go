@@ -41,6 +41,25 @@ func (s *PostgresStore) Organization(ctx context.Context, id string) (*Organizat
 	return &result, nil
 }
 
+func (s *PostgresStore) CreateOrganization(ctx context.Context, slug, displayName, ownerID string) (Organization, error) {
+	id, err := ids.New()
+	if err != nil {
+		return Organization{}, err
+	}
+	exec := platformdb.ExecutorFrom(ctx, s.pool)
+	var result Organization
+	if err := exec.QueryRow(ctx, `INSERT INTO organizations (id, slug, display_name) VALUES ($1,$2,$3) RETURNING id::text, slug, display_name, created_at`, id, slug, strings.TrimSpace(displayName)).Scan(&result.ID, &result.Slug, &result.DisplayName, &result.CreatedAt); err != nil {
+		return Organization{}, mapStoreError(err, "organization slug is already used")
+	}
+	if _, err := exec.Exec(ctx, `INSERT INTO organization_memberships (organization_id, user_id, role_key) VALUES ($1,$2,'owner')`, id, ownerID); err != nil {
+		return Organization{}, fmt.Errorf("create organization owner: %w", err)
+	}
+	if _, err := exec.Exec(ctx, `INSERT INTO workspaces (organization_id, key, display_name) VALUES ($1,'MAIN','Main')`, id); err != nil {
+		return Organization{}, fmt.Errorf("create organization workspace: %w", err)
+	}
+	return result, nil
+}
+
 func (s *PostgresStore) Workspace(ctx context.Context, organizationID, id string) (*Workspace, error) {
 	var result Workspace
 	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT id::text, organization_id::text, key, display_name, created_at FROM workspaces WHERE organization_id=$1 AND id=$2`, organizationID, id).Scan(&result.ID, &result.OrganizationID, &result.Key, &result.DisplayName, &result.CreatedAt)
@@ -55,7 +74,7 @@ func (s *PostgresStore) Workspace(ctx context.Context, organizationID, id string
 
 func (s *PostgresStore) Project(ctx context.Context, organizationID, id string) (*Project, error) {
 	var result Project
-	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT id::text, organization_id::text, workspace_id::text, key, display_name, created_at FROM projects WHERE organization_id=$1 AND id=$2`, organizationID, id).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.CreatedAt)
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT id::text, organization_id::text, workspace_id::text, key, display_name, done_visibility_days, created_at FROM projects WHERE organization_id=$1 AND id=$2`, organizationID, id).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.DoneVisibilityDays, &result.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, apperr.New(apperr.CodeNotFound, 404, "project not found", nil)
 	}
@@ -71,6 +90,11 @@ SELECT o.id::text, o.slug, o.display_name, o.created_at
 FROM organizations o
 JOIN organization_memberships om ON om.organization_id=o.id
 WHERE om.user_id=$1
+  AND NOT (
+    o.slug LIKE 'github-%'
+    AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.organization_id=o.id)
+    AND (SELECT COUNT(*) FROM organization_memberships om2 WHERE om2.organization_id=o.id)=1
+  )
 ORDER BY lower(o.display_name), o.id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list organizations: %w", err)
@@ -130,7 +154,7 @@ func (s *PostgresStore) UpdateWorkspace(ctx context.Context, organizationID, id,
 }
 
 func (s *PostgresStore) ListProjects(ctx context.Context, organizationID, workspaceID string) ([]Project, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text, organization_id::text, workspace_id::text, key, display_name, created_at FROM projects WHERE organization_id=$1 AND ($2='' OR workspace_id=NULLIF($2, '')::uuid) ORDER BY key`, organizationID, workspaceID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text, organization_id::text, workspace_id::text, key, display_name, done_visibility_days, created_at FROM projects WHERE organization_id=$1 AND ($2='' OR workspace_id=NULLIF($2, '')::uuid) ORDER BY key`, organizationID, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -138,7 +162,7 @@ func (s *PostgresStore) ListProjects(ctx context.Context, organizationID, worksp
 	var result []Project
 	for rows.Next() {
 		var item Project
-		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Key, &item.DisplayName, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.WorkspaceID, &item.Key, &item.DisplayName, &item.DoneVisibilityDays, &item.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		result = append(result, item)
@@ -171,7 +195,7 @@ func (s *PostgresStore) CreateProject(ctx context.Context, organizationID, works
 
 func (s *PostgresStore) createProject(ctx context.Context, exec platformdb.Executor, id, organizationID, workspaceID, key, displayName, creatorID string) (Project, error) {
 	var result Project
-	err := exec.QueryRow(ctx, `INSERT INTO projects (id, organization_id, workspace_id, key, display_name) SELECT $1, $2, $3, $4, $5 WHERE EXISTS (SELECT 1 FROM workspaces WHERE organization_id=$2 AND id=$3) RETURNING id::text, organization_id::text, workspace_id::text, key, display_name, created_at`, id, organizationID, workspaceID, strings.ToUpper(key), strings.TrimSpace(displayName)).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.CreatedAt)
+	err := exec.QueryRow(ctx, `INSERT INTO projects (id, organization_id, workspace_id, key, display_name) SELECT $1, $2, $3, $4, $5 WHERE EXISTS (SELECT 1 FROM workspaces WHERE organization_id=$2 AND id=$3) RETURNING id::text, organization_id::text, workspace_id::text, key, display_name, done_visibility_days, created_at`, id, organizationID, workspaceID, strings.ToUpper(key), strings.TrimSpace(displayName)).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.DoneVisibilityDays, &result.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return Project{}, apperr.New(apperr.CodeNotFound, 404, "workspace not found", nil)
 	}
@@ -186,12 +210,24 @@ func (s *PostgresStore) createProject(ctx context.Context, exec platformdb.Execu
 
 func (s *PostgresStore) UpdateProject(ctx context.Context, organizationID, id, displayName string) (Project, error) {
 	var result Project
-	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE projects SET display_name=$1 WHERE organization_id=$2 AND id=$3 RETURNING id::text, organization_id::text, workspace_id::text, key, display_name, created_at`, strings.TrimSpace(displayName), organizationID, id).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.CreatedAt)
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE projects SET display_name=$1 WHERE organization_id=$2 AND id=$3 RETURNING id::text, organization_id::text, workspace_id::text, key, display_name, done_visibility_days, created_at`, strings.TrimSpace(displayName), organizationID, id).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.DoneVisibilityDays, &result.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return Project{}, apperr.New(apperr.CodeNotFound, 404, "project not found", nil)
 	}
 	if err != nil {
 		return Project{}, fmt.Errorf("update project: %w", err)
+	}
+	return result, nil
+}
+
+func (s *PostgresStore) UpdateProjectDoneVisibilityDays(ctx context.Context, organizationID, id string, days int) (Project, error) {
+	var result Project
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE projects SET done_visibility_days=$1 WHERE organization_id=$2 AND id=$3 RETURNING id::text, organization_id::text, workspace_id::text, key, display_name, done_visibility_days, created_at`, days, organizationID, id).Scan(&result.ID, &result.OrganizationID, &result.WorkspaceID, &result.Key, &result.DisplayName, &result.DoneVisibilityDays, &result.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return Project{}, apperr.New(apperr.CodeNotFound, 404, "project not found", nil)
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("update project board settings: %w", err)
 	}
 	return result, nil
 }
@@ -421,6 +457,29 @@ func (s *MemoryStore) Organization(_ context.Context, id string) (*Organization,
 	return &item, nil
 }
 
+func (s *MemoryStore) CreateOrganization(_ context.Context, slug, displayName, ownerID string) (Organization, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.organizations {
+		if strings.EqualFold(item.Slug, slug) {
+			return Organization{}, apperr.New(apperr.CodeConflict, 409, "organization slug is already used", nil)
+		}
+	}
+	id, err := ids.New()
+	if err != nil {
+		return Organization{}, err
+	}
+	workspaceID, err := ids.New()
+	if err != nil {
+		return Organization{}, err
+	}
+	item := Organization{ID: id, Slug: slug, DisplayName: strings.TrimSpace(displayName), CreatedAt: time.Now().UTC()}
+	s.organizations[id] = item
+	s.organizationMembers[id] = []Member{{ID: ownerID, Login: ownerID, RoleKey: "owner"}}
+	s.workspaces[workspaceID] = Workspace{ID: workspaceID, OrganizationID: id, Key: "MAIN", DisplayName: "Main", CreatedAt: item.CreatedAt}
+	return item, nil
+}
+
 func (s *MemoryStore) Workspace(_ context.Context, organizationID, id string) (*Workspace, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -451,6 +510,16 @@ func (s *MemoryStore) ListOrganizations(_ context.Context, userID string) ([]Org
 				continue
 			}
 			if organization, ok := s.organizations[organizationID]; ok {
+				hasProjects := false
+				for _, project := range s.projects {
+					if project.OrganizationID == organizationID {
+						hasProjects = true
+						break
+					}
+				}
+				if strings.HasPrefix(strings.ToLower(organization.Slug), "github-") && !hasProjects && len(members) == 1 {
+					break
+				}
 				result = append(result, organization)
 			}
 			break
@@ -557,6 +626,18 @@ func (s *MemoryStore) UpdateProject(_ context.Context, organizationID, id, displ
 		return Project{}, apperr.New(apperr.CodeNotFound, 404, "project not found", nil)
 	}
 	item.DisplayName = strings.TrimSpace(displayName)
+	s.projects[id] = item
+	return item, nil
+}
+
+func (s *MemoryStore) UpdateProjectDoneVisibilityDays(_ context.Context, organizationID, id string, days int) (Project, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.projects[id]
+	if !ok || item.OrganizationID != organizationID {
+		return Project{}, apperr.New(apperr.CodeNotFound, 404, "project not found", nil)
+	}
+	item.DoneVisibilityDays = days
 	s.projects[id] = item
 	return item, nil
 }

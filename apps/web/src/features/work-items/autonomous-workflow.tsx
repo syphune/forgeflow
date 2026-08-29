@@ -25,10 +25,12 @@ function workflowLabel(value: string): string {
 export function AutonomousWorkflowPanel({
   projectID,
   item,
+  repositoryID,
   authorization,
 }: {
   projectID: string;
   item: WorkItem;
+  repositoryID: string;
   authorization: AuthorizationContext | null;
 }) {
   const client = useMemo(() => browserAPI(projectID), [projectID]);
@@ -71,13 +73,13 @@ export function AutonomousWorkflowPanel({
 
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canStart || busyID || !objective.trim() || !item.repository_id) return;
+    if (!canStart || busyID || !objective.trim() || !repositoryID) return;
     setBusyID("create");
     setError("");
     try {
       const created = await client.startAutonomousRun({
         work_item_id: item.id,
-        repository_id: item.repository_id,
+        repository_id: repositoryID,
         objective: objective.trim(),
         agent_provider: provider as "codex" | "claude",
       }, projectID);
@@ -152,11 +154,11 @@ export function AutonomousWorkflowPanel({
           <h3 id="autonomous-workflow-heading">{t("work.autonomous-workflow")}</h3>
           <p>{t("work.autonomous-workflow-description")}</p>
         </div>
-        <button className="button button-primary" type="button" onClick={() => setFormOpen((current) => !current)} disabled={!canStart || !item.repository_id}>
+        <button className="button button-primary" type="button" onClick={() => setFormOpen((current) => !current)} disabled={!canStart || !repositoryID}>
           {formOpen ? t("backlog.close") : t("work.start-autonomous")}
         </button>
       </div>
-      {!item.repository_id ? <div className="app-v2-inline-note">{t("work.agent-repository-required")}</div> : null}
+      {!repositoryID ? <div className="app-v2-inline-note">{t("work.agent-repository-required")}</div> : null}
       {!canStart ? <div className="app-v2-inline-note">{t("work.autonomous-read-only")}</div> : null}
       {error ? <div className="app-v2-error-panel" role="alert"><strong>{t("work.autonomous-error")}</strong><span>{error}</span><button type="button" onClick={() => void load()}>{t("app.retry")}</button></div> : null}
       {message ? <p className="app-v2-action-status" role="status">{message}</p> : null}

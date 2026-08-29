@@ -16,8 +16,19 @@ export type Member = components["schemas"]["Member"];
 export type Organization = components["schemas"]["Organization"];
 export type Workspace = components["schemas"]["Workspace"];
 export type Project = components["schemas"]["Project"];
+export type ProjectBoardSettings = components["schemas"]["ProjectBoardSettings"];
+export type ProjectBoardSettingsRequest = components["schemas"]["ProjectBoardSettingsRequest"];
+export type BoardColumn = components["schemas"]["BoardColumn"];
+export type BoardResponse = components["schemas"]["BoardResponse"];
 export type WorkflowResponse = components["schemas"]["WorkflowResponse"];
 export type WorkflowTransition = components["schemas"]["WorkflowTransition"];
+export type DeliveryPolicy = components["schemas"]["DeliveryPolicy"];
+export type BranchPolicy = components["schemas"]["BranchPolicy"];
+export type BranchPolicyInput = components["schemas"]["BranchPolicyInput"];
+export type BranchPlan = components["schemas"]["BranchPlan"];
+export type BranchPlanPreview = components["schemas"]["BranchPlanPreview"];
+export type BranchPlanPreviewRequest = components["schemas"]["BranchPlanPreviewRequest"];
+export type BranchOperation = components["schemas"]["BranchOperation"];
 export type SpecificationResponse = components["schemas"]["SpecificationResponse"];
 export type Specification = components["schemas"]["Specification"];
 export type SpecificationUpdateRequest = components["schemas"]["SpecificationUpdateRequest"];
@@ -26,6 +37,7 @@ export type VerificationRequest = components["schemas"]["VerificationRequest"];
 export type GitHubRepository = components["schemas"]["GitHubRepository"];
 export type GitHubInstallation = components["schemas"]["GitHubInstallation"];
 export type RepositoryContext = components["schemas"]["RepositoryContext"];
+export type RepositoryInitialization = components["schemas"]["RepositoryInitialization"];
 export type RepositoryCommit = components["schemas"]["RepositoryCommit"];
 export type RepositoryTreeEntry = components["schemas"]["RepositoryTreeEntry"];
 export type RepositoryFile = components["schemas"]["RepositoryFile"];
@@ -64,14 +76,14 @@ export type CreateAutomationRuleRequest = components["schemas"]["CreateAutomatio
 export type PersonalAccessToken = components["schemas"]["PersonalAccessToken"];
 export type CreateTokenRequest = components["schemas"]["CreateTokenRequest"];
 export type CreateTenantRequest = components["schemas"]["CreateTenantRequest"];
+export type CreateOrganizationRequest = components["schemas"]["CreateOrganizationRequest"];
+export type CreateProjectRequest = components["schemas"]["CreateProjectRequest"];
 export type RenameRequest = components["schemas"]["RenameRequest"];
 export type MemberRoleRequest = components["schemas"]["MemberRoleRequest"];
 export type OrganizationMemberRequest = components["schemas"]["OrganizationMemberRequest"];
 export type WorkItemType = CreateWorkItemRequest["type"];
 
 export type WorkItemList = { items: WorkItem[]; next_cursor?: string | null };
-export type BoardColumn = { status: string; name: string; position: number; ordering_version: number; items: WorkItem[] };
-export type BoardResponse = { project_id: string; columns: BoardColumn[]; truncated: boolean };
 
 export type APIClientOptions = {
   baseURL?: string;
@@ -159,6 +171,7 @@ export class APIClient {
     cursor?: string;
     limit?: number;
     includeArchived?: boolean;
+    excludeTerminal?: boolean;
     sort?: "updated" | "backlog";
   } = {}): Promise<WorkItemList> {
     const query = new URLSearchParams();
@@ -173,6 +186,7 @@ export class APIClient {
       cursor: params.cursor,
       limit: params.limit,
       include_archived: params.includeArchived,
+      exclude_terminal: params.excludeTerminal,
       sort: params.sort,
     };
     for (const [key, value] of Object.entries(values)) {
@@ -190,6 +204,10 @@ export class APIClient {
     return this.request<{ items: Organization[] }>("/organizations");
   }
 
+  createOrganization(input: CreateOrganizationRequest): Promise<Organization> {
+    return this.request<Organization>("/organizations", { method: "POST", body: input });
+  }
+
   listWorkspaces(): Promise<{ items: Workspace[] }> {
     return this.request<{ items: Workspace[] }>("/workspaces");
   }
@@ -197,6 +215,10 @@ export class APIClient {
   listProjects(workspaceID?: string): Promise<{ items: Project[] }> {
     const query = workspaceID ? `?workspace_id=${encodeURIComponent(workspaceID)}` : "";
     return this.request<{ items: Project[] }>(`/projects${query}`);
+  }
+
+  createProject(input: CreateProjectRequest): Promise<Project> {
+    return this.request<Project>("/projects", { method: "POST", body: input });
   }
 
   getOrganizationAuthorization(id: string): Promise<AuthorizationContext> {
@@ -217,6 +239,38 @@ export class APIClient {
 
   getWorkflow(projectID?: string): Promise<WorkflowResponse> {
     return this.request<WorkflowResponse>("/workflows/current", { projectID });
+  }
+
+  getProjectBranchPolicy(projectID: string): Promise<BranchPolicy> {
+    return this.request<BranchPolicy>(`/projects/${encodeURIComponent(projectID)}/branch-policy`, { projectID });
+  }
+
+  saveProjectBranchPolicy(projectID: string, input: BranchPolicyInput): Promise<BranchPolicy> {
+    return this.request<BranchPolicy>(`/projects/${encodeURIComponent(projectID)}/branch-policy`, { method: "PUT", projectID, body: input });
+  }
+
+  getWorkItemBranchPlan(id: string, projectID?: string): Promise<BranchPlan> {
+    return this.request<BranchPlan>(`/work-items/${encodeURIComponent(id)}/branch-plan`, { projectID });
+  }
+
+  previewWorkItemBranchPlan(id: string, input: BranchPlanPreviewRequest = {}, projectID?: string): Promise<BranchPlanPreview> {
+    return this.request<BranchPlanPreview>(`/work-items/${encodeURIComponent(id)}/branch-plan/preview`, { method: "POST", projectID, body: input });
+  }
+
+  prepareWorkItemBranchPlan(id: string, input: BranchPlanPreviewRequest = {}, projectID?: string): Promise<BranchPlan> {
+    return this.request<BranchPlan>(`/work-items/${encodeURIComponent(id)}/branch-plan/prepare`, { method: "POST", projectID, body: input });
+  }
+
+  createWorkItemBranchPullRequest(id: string, projectID?: string): Promise<BranchOperation> {
+    return this.request<BranchOperation>(`/work-items/${encodeURIComponent(id)}/branch-plan/pull-request`, { method: "POST", projectID });
+  }
+
+  syncWorkItemBranchPlan(id: string, projectID?: string): Promise<{ items: BranchOperation[] }> {
+    return this.request<{ items: BranchOperation[] }>(`/work-items/${encodeURIComponent(id)}/branch-plan/sync`, { method: "POST", projectID });
+  }
+
+  listWorkItemBranchOperations(id: string, projectID?: string): Promise<{ items: BranchOperation[] }> {
+    return this.request<{ items: BranchOperation[] }>(`/work-items/${encodeURIComponent(id)}/branch-plan/operations`, { projectID });
   }
 
   getBoard(projectID?: string): Promise<BoardResponse> {
@@ -378,6 +432,26 @@ export class APIClient {
     return this.request<Project>(`/projects/${encodeURIComponent(id)}`, { method: "PATCH", body: input });
   }
 
+  getProjectBoardSettings(id: string): Promise<ProjectBoardSettings> {
+    return this.request<ProjectBoardSettings>(`/projects/${encodeURIComponent(id)}/board-settings`, { projectID: id });
+  }
+
+  updateProjectBoardSettings(id: string, input: ProjectBoardSettingsRequest): Promise<ProjectBoardSettings> {
+    return this.request<ProjectBoardSettings>(`/projects/${encodeURIComponent(id)}/board-settings`, { method: "PUT", projectID: id, body: input });
+  }
+
+  getProjectDeliveryPolicy(id: string): Promise<DeliveryPolicy> {
+    return this.request<DeliveryPolicy>(`/projects/${encodeURIComponent(id)}/delivery-policy`, { projectID: id });
+  }
+
+  updateProjectDeliveryPolicy(id: string, input: DeliveryPolicy): Promise<DeliveryPolicy> {
+    return this.request<DeliveryPolicy>(`/projects/${encodeURIComponent(id)}/delivery-policy`, { method: "PUT", projectID: id, body: input });
+  }
+
+  installReleaseGatedWorkflow(projectID: string): Promise<WorkflowResponse> {
+    return this.request<WorkflowResponse>("/workflows/current/templates/release-gated", { method: "POST", projectID });
+  }
+
   listAgentRuns(projectID: string, workItemID?: string): Promise<{ items: AgentRun[] }> {
     const query = workItemID ? `?work_item_id=${encodeURIComponent(workItemID)}` : "";
     return this.request<{ items: AgentRun[] }>(`/agent-runs${query}`, { projectID });
@@ -480,6 +554,10 @@ export class APIClient {
     return this.request<DeploymentRequest>(`/deployments/${encodeURIComponent(id)}/approve`, { method: "POST", projectID });
   }
 
+  verifyDeployment(id: string, projectID?: string): Promise<DeploymentRequest> {
+    return this.request<DeploymentRequest>(`/deployments/${encodeURIComponent(id)}/verify`, { method: "POST", projectID });
+  }
+
   updateDeploymentStatus(id: string, input: DeploymentStatusRequest, projectID?: string): Promise<DeploymentRequest> {
     return this.request<DeploymentRequest>(`/deployments/${encodeURIComponent(id)}/status`, { method: "POST", projectID, body: input });
   }
@@ -538,6 +616,10 @@ export class APIClient {
 
   getRepositoryContext(projectID: string, repositoryID: string): Promise<RepositoryContext> {
     return this.request<RepositoryContext>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/context`, { projectID });
+  }
+
+  initializeRepository(projectID: string, repositoryID: string, idempotencyKey: string): Promise<RepositoryInitialization> {
+    return this.request<RepositoryInitialization>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/initialize`, { method: "POST", projectID, idempotencyKey });
   }
 
   listRepositoryTree(projectID: string, repositoryID: string): Promise<{ items: RepositoryTreeEntry[] }> {

@@ -211,10 +211,24 @@ func TestAttachResultRejectsTerminalRun(t *testing.T) {
 func TestRecordTestResultsMergesPassesAndRequiresFailureNotes(t *testing.T) {
 	store := NewMemoryStore()
 	service := NewService(store, nil)
-	actor := identity.Actor{Type: "human", ID: "qa", OrganizationID: "org", Capabilities: map[string]bool{identity.CapabilityWorkItemEdit: true, identity.CapabilityAgentExecute: true}}
+	actor := identity.Actor{Type: "human", ID: "qa", OrganizationID: "org", Capabilities: map[string]bool{identity.CapabilityWorkItemEdit: true, identity.CapabilityAgentExecute: true, identity.CapabilityAgentApprove: true}}
 	run, err := service.Create(context.Background(), actor, CreateInput{ProjectID: "project", WorkItemID: "item", RepositoryID: "repo", AgentProvider: "codex", AgentName: "codex"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.RecordTestResults(context.Background(), actor, "project", run.ID, TestResultsInput{Cases: []TestCaseResultInput{{Position: 1, Status: TestPassed}}}); err == nil {
+		t.Fatal("expected queued AgentRun test result rejection")
+	}
+	if _, err := service.Approve(context.Background(), actor, "project", run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Start(context.Background(), actor, "project", run.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []Status{Planning, Investigating, Implementing, Testing} {
+		if _, err := service.Transition(context.Background(), actor, "project", run.ID, status); err != nil {
+			t.Fatalf("transition to %s: %v", status, err)
+		}
 	}
 	if _, err := service.RecordTestResults(context.Background(), actor, "project", run.ID, TestResultsInput{Cases: []TestCaseResultInput{{Position: 1, Status: TestPassed}}}); err != nil {
 		t.Fatal(err)
@@ -301,5 +315,64 @@ func TestServiceRequiresProjectScopeForRunReads(t *testing.T) {
 	actor := identity.Actor{Type: "human", ID: "user", OrganizationID: "org", Capabilities: map[string]bool{"*": true}}
 	if _, _, _, err := service.Get(context.Background(), actor, "", "run"); err == nil {
 		t.Fatal("expected missing project scope error")
+	}
+}
+
+func TestHasPassingQARequiresAllRequiredCasesOnExactCommit(t *testing.T) {
+	ctx := context.Background()
+	now := func() time.Time { return time.Unix(100, 0).UTC() }
+	specStore := specification.NewMemoryStore()
+	specService := specification.NewService(specStore, now)
+	workItems := workitem.NewService(
+		workitem.NewMemoryRepository(now),
+		specService,
+		workflow.NewService(workflow.Default()),
+		audit.NewMemoryWriter(),
+		outbox.NewMemoryWriter(),
+		now,
+	)
+	if err := specStore.Save(ctx, "org", "project", &specification.Specification{
+		ID:         "spec-1",
+		WorkItemID: "item",
+		Version:    1,
+		Fields:     map[specification.FieldKey]specification.Field{},
+		RegressionCases: []specification.RegressionTestCase{
+			{Position: 1, GateClass: specification.GateRequired},
+			{Position: 2, GateClass: specification.GateRequired},
+			{Position: 3, GateClass: specification.GateOptional},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemoryStore()
+	store.runs["run-1"] = Run{
+		ID:              "run-1",
+		OrganizationID:  "org",
+		ProjectID:       "project",
+		WorkItemID:      "item",
+		Status:          Completed,
+		CommitSHA:       "sha-2",
+		ExecutionInputs: ExecutionInputs{TestCasePositions: []int{1, 2}},
+		Result: map[string]any{"test_cases": []TestCaseResult{
+			{Position: 1, Status: TestPassed},
+			{Position: 2, Status: TestPassed},
+		}},
+	}
+	service := NewService(store, workItems)
+
+	if passed, err := service.HasPassingQA(ctx, "org", "project", "item", "sha-1"); err != nil || passed {
+		t.Fatalf("stale commit QA result = %v, %v", passed, err)
+	}
+	if passed, err := service.HasPassingQA(ctx, "org", "project", "item", "sha-2"); err != nil || !passed {
+		t.Fatalf("complete required QA result = %v, %v", passed, err)
+	}
+
+	store.runs["run-1"] = func() Run {
+		run := store.runs["run-1"]
+		run.ExecutionInputs.TestCasePositions = []int{1}
+		return run
+	}()
+	if passed, err := service.HasPassingQA(ctx, "org", "project", "item", "sha-2"); err != nil || passed {
+		t.Fatalf("incomplete required QA result = %v, %v", passed, err)
 	}
 }

@@ -42,10 +42,15 @@ type AgentRunProjector interface {
 	UpdateCIRun(context.Context, string, string, string, string, string, string, string) error
 }
 
+type BranchPlanProjector interface {
+	MarkPullRequestMerged(context.Context, string, string, int64) error
+}
+
 type PostgresWebhookStore struct {
-	pool      *pgxpool.Pool
-	outbox    outbox.Writer
-	agentRuns AgentRunProjector
+	pool        *pgxpool.Pool
+	outbox      outbox.Writer
+	agentRuns   AgentRunProjector
+	branchPlans BranchPlanProjector
 }
 
 func NewPostgresWebhookStore(pool *pgxpool.Pool, outboxWriters ...outbox.Writer) *PostgresWebhookStore {
@@ -58,6 +63,10 @@ func NewPostgresWebhookStore(pool *pgxpool.Pool, outboxWriters ...outbox.Writer)
 
 func (s *PostgresWebhookStore) SetAgentRunProjector(projector AgentRunProjector) {
 	s.agentRuns = projector
+}
+
+func (s *PostgresWebhookStore) SetBranchPlanProjector(projector BranchPlanProjector) {
+	s.branchPlans = projector
 }
 func (s *PostgresWebhookStore) Persist(ctx context.Context, event WebhookEvent) (bool, error) {
 	headers, _ := json.Marshal(event.Headers)
@@ -164,7 +173,7 @@ func webhookAutomationEvent(eventName string) string {
 	switch strings.TrimSpace(eventName) {
 	case "push":
 		return "github.push"
-	case "pull_request":
+	case "pull_request", "pull_request_review":
 		return "github.pull_request.updated"
 	case "workflow_run", "check_run", "check_suite":
 		return "github.ci.updated"
@@ -201,25 +210,41 @@ type pushPayload struct {
 
 type pullRequestPayload struct {
 	webhookEnvelope
-	Number      int64 `json:"number"`
+	Action      string `json:"action"`
+	Number      int64  `json:"number"`
 	PullRequest struct {
 		Title     string `json:"title"`
 		State     string `json:"state"`
 		Draft     bool   `json:"draft"`
+		Merged    bool   `json:"merged"`
 		HTMLURL   string `json:"html_url"`
 		UpdatedAt string `json:"updated_at"`
 		Head      struct {
 			SHA string `json:"sha"`
 			Ref string `json:"ref"`
 		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 		Body string `json:"body"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		ChangedPaths []string `json:"changed_paths"`
 	} `json:"pull_request"`
+	Review struct {
+		State string `json:"state"`
+		User  struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	} `json:"review"`
 }
 
 type ciPayload struct {
 	webhookEnvelope
 	WorkflowRun *struct {
 		ID         int64  `json:"id"`
+		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 		HeadSHA    string `json:"head_sha"`
@@ -228,6 +253,7 @@ type ciPayload struct {
 	} `json:"workflow_run"`
 	CheckRun *struct {
 		ID         int64  `json:"id"`
+		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 		HeadSHA    string `json:"head_sha"`
@@ -236,6 +262,7 @@ type ciPayload struct {
 	} `json:"check_run"`
 	CheckSuite *struct {
 		ID         int64  `json:"id"`
+		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 		HeadSHA    string `json:"head_sha"`
@@ -316,6 +343,25 @@ DO UPDATE SET message=EXCLUDED.message, author_login=EXCLUDED.author_login, comm
 				break
 			}
 		}
+	case "pull_request_review":
+		var payload pullRequestPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode pull request review webhook: %w", err)
+		}
+		login := strings.TrimSpace(payload.Review.User.Login)
+		state := strings.ToLower(strings.TrimSpace(payload.Review.State))
+		if payload.Number <= 0 || login == "" || (state != "approved" && state != "changes_requested" && state != "dismissed") {
+			return nil
+		}
+		_, err = platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `
+UPDATE pull_requests
+SET approved_by_logins=CASE
+      WHEN lower($4)='approved' THEN ARRAY(SELECT DISTINCT value FROM unnest(approved_by_logins || ARRAY[$3]::text[]) value WHERE value <> '')
+      ELSE array_remove(approved_by_logins, $3)
+    END,
+    changes_requested=CASE WHEN lower($4)='changes_requested' THEN true WHEN lower($4)='approved' THEN false ELSE changes_requested END,
+    updated_at=GREATEST(updated_at,$5)
+WHERE organization_id=$1 AND repository_id=$2 AND number=$6`, organizationID, repositoryID, login, state, event.ReceivedAt, payload.Number)
 	case "pull_request":
 		var payload pullRequestPayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -329,13 +375,17 @@ DO UPDATE SET message=EXCLUDED.message, author_login=EXCLUDED.author_login, comm
 			return err
 		}
 		updatedAt := webhookTime(payload.PullRequest.UpdatedAt, event.ReceivedAt)
+		changedPaths := payload.PullRequest.ChangedPaths
+		if changedPaths == nil {
+			changedPaths = []string{}
+		}
 		_, err = platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `
-INSERT INTO pull_requests (organization_id, repository_id, work_item_id, number, title, state, draft, head_sha, head_ref, body, url, updated_at)
-VALUES ($1,$2,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+INSERT INTO pull_requests (organization_id, repository_id, work_item_id, number, title, state, draft, head_sha, head_ref, base_ref, body, url, author_login, changed_paths, merged, updated_at)
+VALUES ($1,$2,NULLIF($3,'')::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 ON CONFLICT (organization_id, repository_id, number)
-DO UPDATE SET work_item_id=COALESCE(EXCLUDED.work_item_id,pull_requests.work_item_id), title=EXCLUDED.title, state=EXCLUDED.state, draft=EXCLUDED.draft, head_sha=EXCLUDED.head_sha, head_ref=EXCLUDED.head_ref, body=EXCLUDED.body, url=EXCLUDED.url, updated_at=EXCLUDED.updated_at
+DO UPDATE SET work_item_id=COALESCE(EXCLUDED.work_item_id,pull_requests.work_item_id), title=EXCLUDED.title, state=EXCLUDED.state, draft=EXCLUDED.draft, head_sha=EXCLUDED.head_sha, head_ref=EXCLUDED.head_ref, base_ref=EXCLUDED.base_ref, body=EXCLUDED.body, url=EXCLUDED.url, author_login=COALESCE(NULLIF(EXCLUDED.author_login,''),pull_requests.author_login), changed_paths=CASE WHEN cardinality(EXCLUDED.changed_paths)>0 THEN EXCLUDED.changed_paths ELSE pull_requests.changed_paths END, merged=EXCLUDED.merged, updated_at=EXCLUDED.updated_at
 WHERE pull_requests.updated_at <= EXCLUDED.updated_at
-`, organizationID, repositoryID, workItemID, payload.Number, payload.PullRequest.Title, payload.PullRequest.State, payload.PullRequest.Draft, payload.PullRequest.Head.SHA, payload.PullRequest.Head.Ref, payload.PullRequest.Body, payload.PullRequest.HTMLURL, updatedAt)
+`, organizationID, repositoryID, workItemID, payload.Number, payload.PullRequest.Title, payload.PullRequest.State, payload.PullRequest.Draft, payload.PullRequest.Head.SHA, payload.PullRequest.Head.Ref, payload.PullRequest.Base.Ref, payload.PullRequest.Body, payload.PullRequest.HTMLURL, payload.PullRequest.User.Login, changedPaths, payload.PullRequest.Merged, updatedAt)
 		if err == nil && s.agentRuns != nil {
 			var pullRequestID, storedWorkItemID, storedHeadRef, storedHeadSHA string
 			err = platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT id::text, COALESCE(work_item_id::text,''), head_ref, head_sha FROM pull_requests WHERE organization_id=$1 AND repository_id=$2 AND number=$3`, organizationID, repositoryID, payload.Number).Scan(&pullRequestID, &storedWorkItemID, &storedHeadRef, &storedHeadSHA)
@@ -343,41 +393,44 @@ WHERE pull_requests.updated_at <= EXCLUDED.updated_at
 				err = s.agentRuns.LinkPullRequest(ctx, organizationID, repositoryID, storedWorkItemID, storedHeadRef, storedHeadSHA, pullRequestID)
 			}
 		}
+		if err == nil && payload.PullRequest.Merged && s.branchPlans != nil {
+			err = s.branchPlans.MarkPullRequestMerged(ctx, organizationID, repositoryID, payload.Number)
+		}
 	case "workflow_run", "check_run", "check_suite":
 		var payload ciPayload
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return fmt.Errorf("decode CI webhook: %w", err)
 		}
 		var id int64
-		var status, conclusion, sha, url, prefix, updatedAtValue string
+		var status, conclusion, sha, url, checkName, prefix, updatedAtValue string
 		switch event.EventName {
 		case "workflow_run":
 			if payload.WorkflowRun == nil {
 				return nil
 			}
-			id, status, conclusion, sha, url, prefix, updatedAtValue = payload.WorkflowRun.ID, payload.WorkflowRun.Status, payload.WorkflowRun.Conclusion, payload.WorkflowRun.HeadSHA, payload.WorkflowRun.HTMLURL, "workflow", payload.WorkflowRun.UpdatedAt
+			id, checkName, status, conclusion, sha, url, prefix, updatedAtValue = payload.WorkflowRun.ID, payload.WorkflowRun.Name, payload.WorkflowRun.Status, payload.WorkflowRun.Conclusion, payload.WorkflowRun.HeadSHA, payload.WorkflowRun.HTMLURL, "workflow", payload.WorkflowRun.UpdatedAt
 		case "check_run":
 			if payload.CheckRun == nil {
 				return nil
 			}
-			id, status, conclusion, sha, url, prefix, updatedAtValue = payload.CheckRun.ID, payload.CheckRun.Status, payload.CheckRun.Conclusion, payload.CheckRun.HeadSHA, payload.CheckRun.HTMLURL, "check-run", payload.CheckRun.UpdatedAt
+			id, checkName, status, conclusion, sha, url, prefix, updatedAtValue = payload.CheckRun.ID, payload.CheckRun.Name, payload.CheckRun.Status, payload.CheckRun.Conclusion, payload.CheckRun.HeadSHA, payload.CheckRun.HTMLURL, "check-run", payload.CheckRun.UpdatedAt
 		case "check_suite":
 			if payload.CheckSuite == nil {
 				return nil
 			}
-			id, status, conclusion, sha, url, prefix, updatedAtValue = payload.CheckSuite.ID, payload.CheckSuite.Status, payload.CheckSuite.Conclusion, payload.CheckSuite.HeadSHA, payload.CheckSuite.HTMLURL, "check-suite", payload.CheckSuite.UpdatedAt
+			id, checkName, status, conclusion, sha, url, prefix, updatedAtValue = payload.CheckSuite.ID, payload.CheckSuite.Name, payload.CheckSuite.Status, payload.CheckSuite.Conclusion, payload.CheckSuite.HeadSHA, payload.CheckSuite.HTMLURL, "check-suite", payload.CheckSuite.UpdatedAt
 		}
 		if id <= 0 {
 			return nil
 		}
 		updatedAt := webhookTime(updatedAtValue, event.ReceivedAt)
 		_, err = platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `
-INSERT INTO ci_runs (organization_id, repository_id, external_id, status, conclusion, sha, url, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-ON CONFLICT (organization_id, repository_id, external_id)
-DO UPDATE SET status=EXCLUDED.status, conclusion=EXCLUDED.conclusion, sha=EXCLUDED.sha, url=EXCLUDED.url, updated_at=EXCLUDED.updated_at
-WHERE ci_runs.updated_at <= EXCLUDED.updated_at
-`, organizationID, repositoryID, prefix+":"+strconv.FormatInt(id, 10), status, conclusion, sha, url, updatedAt)
+	INSERT INTO ci_runs (organization_id, repository_id, external_id, check_name, status, conclusion, sha, url, updated_at)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	ON CONFLICT (organization_id, repository_id, external_id)
+	DO UPDATE SET check_name=EXCLUDED.check_name, status=EXCLUDED.status, conclusion=EXCLUDED.conclusion, sha=EXCLUDED.sha, url=EXCLUDED.url, updated_at=EXCLUDED.updated_at
+	WHERE ci_runs.updated_at <= EXCLUDED.updated_at
+	`, organizationID, repositoryID, prefix+":"+strconv.FormatInt(id, 10), checkName, status, conclusion, sha, url, updatedAt)
 		if err == nil && s.agentRuns != nil {
 			var storedStatus, storedConclusion, storedSHA, storedURL, storedExternalID string
 			storedExternalID = prefix + ":" + strconv.FormatInt(id, 10)

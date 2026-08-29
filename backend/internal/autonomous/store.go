@@ -75,11 +75,11 @@ RETURNING `+runColumns, id, organizationID, input.ProjectID, input.WorkItemID, i
 }
 
 func (s *PostgresStore) Get(ctx context.Context, organizationID, projectID, id string) (Run, error) {
-	return scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT `+runColumns+` FROM autonomous_runs WHERE organization_id=$1 AND project_id=$2 AND id=$3`, organizationID, projectID, id))
+	return scanRun(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT `+runColumns+` FROM autonomous_runs WHERE organization_id=$1::uuid AND project_id=$2::uuid AND id=$3::uuid`, organizationID, projectID, id))
 }
 
 func (s *PostgresStore) List(ctx context.Context, organizationID, projectID, workItemID string) ([]Run, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT `+runColumns+` FROM autonomous_runs WHERE organization_id=$1 AND project_id=$2 AND ($3='' OR work_item_id=$3::uuid) ORDER BY created_at DESC, id DESC`, organizationID, projectID, strings.TrimSpace(workItemID))
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT `+runColumns+` FROM autonomous_runs WHERE organization_id=$1::uuid AND project_id=$2::uuid AND ($3='' OR work_item_id=$3::uuid) ORDER BY created_at DESC, id DESC`, organizationID, projectID, strings.TrimSpace(workItemID))
 	if err != nil {
 		return nil, fmt.Errorf("list autonomous runs: %w", err)
 	}
@@ -101,13 +101,14 @@ func (s *PostgresStore) Update(ctx context.Context, organizationID, projectID, i
 		finishedAt = time.Now().UTC()
 	}
 	row := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
-UPDATE autonomous_runs SET status=$1, phase=$2, gate=NULLIF($3,''),
- current_agent_run_id=NULLIF($4,'')::uuid, pull_request_id=NULLIF($5,'')::uuid, commit_sha=NULLIF($6,''),
- attempt=CASE WHEN $7<0 THEN attempt ELSE $7 END, unresolved_positions=$8, last_error=$9,
- version=version+1, updated_at=now(), finished_at=CASE WHEN $10 THEN $11 ELSE finished_at END
-WHERE organization_id=$12 AND project_id=$13 AND id=$14 AND ($15=0 OR version=$15)
+UPDATE autonomous_runs SET status=$1, phase=$2, gate=COALESCE(NULLIF($3,''),''),
+ current_agent_run_id=COALESCE(NULLIF($4,'')::uuid,current_agent_run_id), pull_request_id=COALESCE(NULLIF($5,'')::uuid,pull_request_id), commit_sha=COALESCE(NULLIF($6,''),commit_sha),
+ base_sha=COALESCE(NULLIF($7,''),base_sha), branch=COALESCE(NULLIF($8,''),branch),
+ attempt=CASE WHEN $9<0 THEN attempt ELSE $9 END, unresolved_positions=$10, last_error=$11,
+ version=version+1, updated_at=now(), finished_at=CASE WHEN $12 THEN $13 ELSE finished_at END
+WHERE organization_id=$14::uuid AND project_id=$15::uuid AND id=$16::uuid AND ($17=0 OR version=$17)
 RETURNING `+runColumns, input.Status, input.Phase, input.Gate, input.CurrentAgentRunID, input.PullRequestID, input.CommitSHA,
-		input.Attempt, input.UnresolvedPositions, strings.TrimSpace(input.LastError), input.Finished, finishedAt, organizationID, projectID, id, input.ExpectedVersion)
+		input.BaseSHA, input.Branch, input.Attempt, input.UnresolvedPositions, strings.TrimSpace(input.LastError), input.Finished, finishedAt, organizationID, projectID, id, input.ExpectedVersion)
 	result, err := scanRun(row)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
@@ -121,7 +122,7 @@ RETURNING `+runColumns, input.Status, input.Phase, input.Gate, input.CurrentAgen
 func (s *PostgresStore) AddFeedback(ctx context.Context, organizationID, projectID, runID string, feedback Feedback) (Feedback, error) {
 	row := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
 INSERT INTO autonomous_feedback (id, organization_id, autonomous_run_id, source, note, severity, commit_sha, test_case_positions, evidence_refs, created_by)
-SELECT $1,$2,id,$4,$5,$6,NULLIF($7,''),$8,$9,$10 FROM autonomous_runs WHERE organization_id=$2 AND project_id=$3 AND id=$11
+SELECT $1,$2,id,$4,$5,$6,COALESCE(NULLIF($7,''),''),$8,$9,$10 FROM autonomous_runs WHERE organization_id=$2::uuid AND project_id=$3::uuid AND id=$11::uuid
 RETURNING id::text, autonomous_run_id::text, source, note, severity, COALESCE(commit_sha,''), test_case_positions, evidence_refs, created_by, created_at`, feedback.ID, organizationID, projectID, feedback.Source, feedback.Note, feedback.Severity, feedback.CommitSHA, feedback.TestCasePositions, feedback.EvidenceRefs, feedback.CreatedBy, runID)
 	var result Feedback
 	if err := row.Scan(&result.ID, &result.RunID, &result.Source, &result.Note, &result.Severity, &result.CommitSHA, &result.TestCasePositions, &result.EvidenceRefs, &result.CreatedBy, &result.CreatedAt); err != nil {
@@ -131,7 +132,7 @@ RETURNING id::text, autonomous_run_id::text, source, note, severity, COALESCE(co
 }
 
 func (s *PostgresStore) ListFeedback(ctx context.Context, organizationID, projectID, runID string) ([]Feedback, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT f.id::text, f.autonomous_run_id::text, f.source, f.note, f.severity, COALESCE(f.commit_sha,''), f.test_case_positions, f.evidence_refs, f.created_by, f.created_at FROM autonomous_feedback f JOIN autonomous_runs r ON r.organization_id=f.organization_id AND r.id=f.autonomous_run_id WHERE f.organization_id=$1 AND r.project_id=$2 AND f.autonomous_run_id=$3 ORDER BY f.created_at, f.id`, organizationID, projectID, runID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT f.id::text, f.autonomous_run_id::text, f.source, f.note, f.severity, COALESCE(f.commit_sha,''), f.test_case_positions, f.evidence_refs, f.created_by, f.created_at FROM autonomous_feedback f JOIN autonomous_runs r ON r.organization_id=f.organization_id AND r.id=f.autonomous_run_id WHERE f.organization_id=$1::uuid AND r.project_id=$2::uuid AND f.autonomous_run_id=$3::uuid ORDER BY f.created_at, f.id`, organizationID, projectID, runID)
 	if err != nil {
 		return nil, fmt.Errorf("list autonomous feedback: %w", err)
 	}
@@ -205,7 +206,21 @@ func (s *MemoryStore) Update(_ context.Context, organizationID, projectID, id st
 		return Run{}, apperr.New(apperr.CodeConflict, 409, "autonomous run version is stale", nil)
 	}
 	run.Status, run.Phase, run.Gate = input.Status, input.Phase, input.Gate
-	run.CurrentAgentRunID, run.PullRequestID, run.CommitSHA = input.CurrentAgentRunID, input.PullRequestID, input.CommitSHA
+	if strings.TrimSpace(input.CurrentAgentRunID) != "" {
+		run.CurrentAgentRunID = strings.TrimSpace(input.CurrentAgentRunID)
+	}
+	if strings.TrimSpace(input.PullRequestID) != "" {
+		run.PullRequestID = strings.TrimSpace(input.PullRequestID)
+	}
+	if strings.TrimSpace(input.CommitSHA) != "" {
+		run.CommitSHA = strings.TrimSpace(input.CommitSHA)
+	}
+	if strings.TrimSpace(input.BaseSHA) != "" {
+		run.BaseSHA = strings.TrimSpace(input.BaseSHA)
+	}
+	if strings.TrimSpace(input.Branch) != "" {
+		run.Branch = strings.TrimSpace(input.Branch)
+	}
 	if input.Attempt >= 0 {
 		run.Attempt = input.Attempt
 	}

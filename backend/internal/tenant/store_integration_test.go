@@ -70,6 +70,9 @@ func TestPostgresStoreAddsProjectCreatorAsMember(t *testing.T) {
 	if updated, err := NewPostgresStore(pool).UpdateProject(ctx, organizationID, project.ID, "Tenant application"); err != nil || updated.DisplayName != "Tenant application" {
 		t.Fatalf("updated project = %#v, err = %v", updated, err)
 	}
+	if updated, err := NewPostgresStore(pool).UpdateProjectDoneVisibilityDays(ctx, organizationID, project.ID, 14); err != nil || updated.DoneVisibilityDays != 14 {
+		t.Fatalf("updated project board settings = %#v, err = %v", updated, err)
+	}
 	members, err := NewPostgresStore(pool).ListMembers(ctx, organizationID, project.ID)
 	if err != nil {
 		t.Fatal(err)

@@ -13,18 +13,23 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	platformdb "github.com/forgeflow/forgeflow/backend/internal/platform/db"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/ids"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Store interface {
 	GetPolicy(context.Context, string, string) (autonomous.Policy, error)
 	SetPolicy(context.Context, string, string, autonomous.Policy) (autonomous.Policy, error)
+	GetDeliveryPolicy(context.Context, string, string) (DeliveryPolicy, error)
+	SetDeliveryPolicy(context.Context, string, DeliveryPolicy, int64) (DeliveryPolicy, error)
 	List(context.Context, string, string) ([]Environment, error)
 	Create(context.Context, string, CreateInput) (Environment, error)
 	CreateDeployment(context.Context, string, DeploymentInput, DeploymentStatus) (DeploymentRequest, error)
 	GetDeployment(context.Context, string, string, string) (DeploymentRequest, error)
 	ApproveDeployment(context.Context, string, string, string, string) (DeploymentRequest, error)
 	UpdateDeployment(context.Context, string, string, string, StatusInput) (DeploymentRequest, error)
+	VerifyDeployment(context.Context, string, string, string, string) (DeploymentRequest, error)
+	HasDeploymentStatus(context.Context, string, string, string, DeploymentStatus, string) (bool, error)
 }
 
 type PostgresStore struct{ pool *pgxpool.Pool }
@@ -58,6 +63,66 @@ func (s *PostgresStore) SetPolicy(ctx context.Context, organizationID, projectID
 		return autonomous.Policy{}, fmt.Errorf("set project AI policy: %w", err)
 	}
 	return policy, nil
+}
+
+func (s *PostgresStore) GetDeliveryPolicy(ctx context.Context, organizationID, projectID string) (DeliveryPolicy, error) {
+	var storedID string
+	var storedVersion int64
+	var updatedAt time.Time
+	var raw []byte
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT id::text, version, policy, updated_at FROM project_delivery_policies WHERE organization_id=$1 AND project_id=$2`, organizationID, projectID).Scan(&storedID, &storedVersion, &raw, &updatedAt)
+	if err == pgx.ErrNoRows {
+		result := DefaultDeliveryPolicy()
+		result.OrganizationID, result.ProjectID = organizationID, projectID
+		return result, nil
+	}
+	if err != nil {
+		return DeliveryPolicy{}, fmt.Errorf("get project delivery policy: %w", err)
+	}
+	result := DeliveryPolicy{}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return DeliveryPolicy{}, fmt.Errorf("decode project delivery policy: %w", err)
+	}
+	result.ID, result.OrganizationID, result.ProjectID = storedID, organizationID, projectID
+	result.Version, result.UpdatedAt = maxInt64(storedVersion, 1), updatedAt
+	return result.Normalize(), nil
+}
+
+func (s *PostgresStore) SetDeliveryPolicy(ctx context.Context, organizationID string, policy DeliveryPolicy, expectedVersion int64) (DeliveryPolicy, error) {
+	policy = policy.Normalize()
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		return DeliveryPolicy{}, err
+	}
+	id, err := ids.New()
+	if err != nil {
+		return DeliveryPolicy{}, err
+	}
+	var storedID string
+	var storedVersion int64
+	var updatedAt time.Time
+	var stored []byte
+	err = platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+INSERT INTO project_delivery_policies (id, organization_id, project_id, policy, version)
+VALUES ($1,$2,$3,$4,1)
+ON CONFLICT (organization_id, project_id) DO UPDATE
+SET policy=EXCLUDED.policy, version=project_delivery_policies.version+1, updated_at=now()
+WHERE project_delivery_policies.version=$5
+	RETURNING id::text, version, policy, updated_at
+	`, id, organizationID, policy.ProjectID, raw, expectedVersion).Scan(&storedID, &storedVersion, &stored, &updatedAt)
+	if err == pgx.ErrNoRows {
+		return DeliveryPolicy{}, apperr.New(apperr.CodeConflict, 409, "delivery policy version is stale or project does not exist", nil)
+	}
+	if err != nil {
+		return DeliveryPolicy{}, fmt.Errorf("set project delivery policy: %w", err)
+	}
+	result := DeliveryPolicy{}
+	if err := json.Unmarshal(stored, &result); err != nil {
+		return DeliveryPolicy{}, fmt.Errorf("decode saved project delivery policy: %w", err)
+	}
+	result.ID, result.OrganizationID, result.ProjectID = storedID, organizationID, policy.ProjectID
+	result.Version, result.UpdatedAt = storedVersion, updatedAt
+	return result.Normalize(), nil
 }
 
 func (s *PostgresStore) List(ctx context.Context, organizationID, projectID string) ([]Environment, error) {
@@ -102,11 +167,11 @@ func (s *PostgresStore) Create(ctx context.Context, organizationID string, input
 	return scanEnvironment(row)
 }
 
-const deploymentColumns = `id::text, organization_id::text, project_id::text, environment_id::text, COALESCE(autonomous_run_id::text,''), commit_sha, status, COALESCE(external_id,''), COALESCE(url,''), COALESCE(approved_by,''), approved_at, COALESCE(last_error,''), version, created_at, updated_at`
+const deploymentColumns = `id::text, organization_id::text, project_id::text, environment_id::text, COALESCE(work_item_id::text,''), COALESCE(autonomous_run_id::text,''), commit_sha, status, COALESCE(external_id,''), COALESCE(url,''), COALESCE(approved_by,''), approved_at, COALESCE(last_error,''), version, created_at, updated_at`
 
 func scanDeployment(row interface{ Scan(...any) error }) (DeploymentRequest, error) {
 	var result DeploymentRequest
-	if err := row.Scan(&result.ID, &result.OrganizationID, &result.ProjectID, &result.EnvironmentID, &result.AutonomousRunID, &result.CommitSHA, &result.Status, &result.ExternalID, &result.URL, &result.ApprovedBy, &result.ApprovedAt, &result.LastError, &result.Version, &result.CreatedAt, &result.UpdatedAt); err != nil {
+	if err := row.Scan(&result.ID, &result.OrganizationID, &result.ProjectID, &result.EnvironmentID, &result.WorkItemID, &result.AutonomousRunID, &result.CommitSHA, &result.Status, &result.ExternalID, &result.URL, &result.ApprovedBy, &result.ApprovedAt, &result.LastError, &result.Version, &result.CreatedAt, &result.UpdatedAt); err != nil {
 		return DeploymentRequest{}, fmt.Errorf("scan deployment request: %w", err)
 	}
 	return result, nil
@@ -117,7 +182,7 @@ func (s *PostgresStore) CreateDeployment(ctx context.Context, organizationID str
 	if err != nil {
 		return DeploymentRequest{}, err
 	}
-	return scanDeployment(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO deployment_requests (id,organization_id,project_id,environment_id,autonomous_run_id,commit_sha,status) VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,$7) RETURNING `+deploymentColumns, id, organizationID, input.ProjectID, input.EnvironmentID, input.AutonomousRunID, input.CommitSHA, status))
+	return scanDeployment(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO deployment_requests (id,organization_id,project_id,environment_id,work_item_id,autonomous_run_id,commit_sha,status) VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,$7,$8) RETURNING `+deploymentColumns, id, organizationID, input.ProjectID, input.EnvironmentID, input.WorkItemID, input.AutonomousRunID, input.CommitSHA, status))
 }
 
 func (s *PostgresStore) GetDeployment(ctx context.Context, organizationID, projectID, id string) (DeploymentRequest, error) {
@@ -129,18 +194,48 @@ func (s *PostgresStore) ApproveDeployment(ctx context.Context, organizationID, p
 }
 
 func (s *PostgresStore) UpdateDeployment(ctx context.Context, organizationID, projectID, id string, input StatusInput) (DeploymentRequest, error) {
-	return scanDeployment(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE deployment_requests SET status=$1, external_id=CASE WHEN $2='' THEN external_id ELSE $2 END, url=CASE WHEN $3='' THEN url ELSE $3 END, last_error=$4, version=version+1, updated_at=now() WHERE organization_id=$5 AND project_id=$6 AND id=$7 RETURNING `+deploymentColumns, input.Status, input.ExternalID, input.URL, input.LastError, organizationID, projectID, id))
+	return scanDeployment(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+UPDATE deployment_requests
+SET status=$1, external_id=CASE WHEN $2='' THEN external_id ELSE $2 END, url=CASE WHEN $3='' THEN url ELSE $3 END, last_error=$4, version=version+1, updated_at=now()
+WHERE organization_id=$5 AND project_id=$6 AND id=$7
+  AND (($1='RUNNING' AND status='DISPATCHED') OR ($1='SUCCEEDED' AND status IN ('DISPATCHED','RUNNING')) OR ($1 IN ('FAILED','CANCELLED') AND status IN ('DISPATCHED','RUNNING')))
+RETURNING `+deploymentColumns, input.Status, input.ExternalID, input.URL, input.LastError, organizationID, projectID, id))
+}
+
+func (s *PostgresStore) VerifyDeployment(ctx context.Context, organizationID, projectID, id, actorID string) (DeploymentRequest, error) {
+	return scanDeployment(platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+UPDATE deployment_requests d
+SET status='VERIFIED', approved_by=CASE WHEN approved_by='' THEN $4 ELSE approved_by END, version=version+1, updated_at=now()
+FROM project_environments e
+WHERE d.environment_id=e.id AND d.organization_id=$1 AND d.project_id=$2 AND d.id=$3
+  AND d.status='SUCCEEDED' AND e.kind='production'
+RETURNING `+deploymentColumns, organizationID, projectID, id, actorID))
+}
+
+func (s *PostgresStore) HasDeploymentStatus(ctx context.Context, organizationID, projectID, workItemID string, status DeploymentStatus, kind string) (bool, error) {
+	var result bool
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM deployment_requests d
+  JOIN project_environments e ON e.id=d.environment_id
+  WHERE d.organization_id=$1 AND d.project_id=$2 AND d.work_item_id=$3 AND d.status=$4 AND ($5='' OR e.kind=$5)
+)`, organizationID, projectID, workItemID, status, kind).Scan(&result)
+	if err != nil {
+		return false, fmt.Errorf("check deployment status: %w", err)
+	}
+	return result, nil
 }
 
 type MemoryStore struct {
 	mu           sync.Mutex
 	policies     map[string]autonomous.Policy
+	delivery     map[string]DeliveryPolicy
 	environments map[string][]Environment
 	deployments  map[string]DeploymentRequest
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{policies: make(map[string]autonomous.Policy), environments: make(map[string][]Environment), deployments: make(map[string]DeploymentRequest)}
+	return &MemoryStore{policies: make(map[string]autonomous.Policy), delivery: make(map[string]DeliveryPolicy), environments: make(map[string][]Environment), deployments: make(map[string]DeploymentRequest)}
 }
 
 func projectKey(org, project string) string { return org + ":" + project }
@@ -159,6 +254,34 @@ func (s *MemoryStore) SetPolicy(_ context.Context, organizationID, projectID str
 	defer s.mu.Unlock()
 	policy = policy.Normalize()
 	s.policies[projectKey(organizationID, projectID)] = policy
+	return policy, nil
+}
+
+func (s *MemoryStore) GetDeliveryPolicy(_ context.Context, organizationID, projectID string) (DeliveryPolicy, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if policy, ok := s.delivery[projectKey(organizationID, projectID)]; ok {
+		return policy, nil
+	}
+	result := DefaultDeliveryPolicy()
+	result.OrganizationID, result.ProjectID = organizationID, projectID
+	return result, nil
+}
+
+func (s *MemoryStore) SetDeliveryPolicy(_ context.Context, organizationID string, policy DeliveryPolicy, expectedVersion int64) (DeliveryPolicy, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := projectKey(organizationID, policy.ProjectID)
+	current, exists := s.delivery[key]
+	if exists && current.Version != expectedVersion {
+		return DeliveryPolicy{}, apperr.New(apperr.CodeConflict, 409, "delivery policy version is stale", nil)
+	}
+	policy.Version = 1
+	if exists {
+		policy.Version = current.Version + 1
+	}
+	policy.OrganizationID = organizationID
+	s.delivery[key] = policy
 	return policy, nil
 }
 
@@ -191,7 +314,7 @@ func (s *MemoryStore) CreateDeployment(_ context.Context, organizationID string,
 		return DeploymentRequest{}, err
 	}
 	now := time.Now().UTC()
-	item := DeploymentRequest{ID: id, OrganizationID: organizationID, ProjectID: input.ProjectID, EnvironmentID: input.EnvironmentID, AutonomousRunID: input.AutonomousRunID, CommitSHA: input.CommitSHA, Status: status, Version: 1, CreatedAt: now, UpdatedAt: now}
+	item := DeploymentRequest{ID: id, OrganizationID: organizationID, ProjectID: input.ProjectID, EnvironmentID: input.EnvironmentID, WorkItemID: input.WorkItemID, AutonomousRunID: input.AutonomousRunID, CommitSHA: input.CommitSHA, Status: status, Version: 1, CreatedAt: now, UpdatedAt: now}
 	s.deployments[id] = item
 	return item, nil
 }
@@ -231,6 +354,9 @@ func (s *MemoryStore) UpdateDeployment(_ context.Context, organizationID, projec
 	if !ok || item.OrganizationID != organizationID || item.ProjectID != projectID {
 		return DeploymentRequest{}, apperr.New(apperr.CodeNotFound, 404, "deployment request not found", nil)
 	}
+	if !validDeploymentUpdate(item.Status, input.Status) {
+		return DeploymentRequest{}, apperr.New(apperr.CodeConflict, 409, "deployment status transition is invalid", map[string]any{"current_status": item.Status, "requested_status": input.Status})
+	}
 	item.Status = input.Status
 	if input.ExternalID != "" {
 		item.ExternalID = input.ExternalID
@@ -243,6 +369,55 @@ func (s *MemoryStore) UpdateDeployment(_ context.Context, organizationID, projec
 	item.UpdatedAt = time.Now().UTC()
 	s.deployments[id] = item
 	return item, nil
+}
+
+func (s *MemoryStore) VerifyDeployment(_ context.Context, organizationID, projectID, id, actorID string) (DeploymentRequest, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.deployments[id]
+	if !ok || item.OrganizationID != organizationID || item.ProjectID != projectID {
+		return DeploymentRequest{}, apperr.New(apperr.CodeNotFound, 404, "deployment request not found", nil)
+	}
+	if item.Status != DeploymentSuccess {
+		return DeploymentRequest{}, apperr.New(apperr.CodeConflict, 409, "only a successful production deployment can be verified", nil)
+	}
+	for _, environment := range s.environments[projectKey(organizationID, projectID)] {
+		if environment.ID != item.EnvironmentID || environment.Kind != "production" {
+			continue
+		}
+		now := time.Now().UTC()
+		item.Status, item.ApprovedBy, item.UpdatedAt = DeploymentVerified, actorID, now
+		item.Version++
+		s.deployments[id] = item
+		return item, nil
+	}
+	return DeploymentRequest{}, apperr.New(apperr.CodeConflict, 409, "deployment is not linked to a production environment", nil)
+}
+
+func (s *MemoryStore) HasDeploymentStatus(_ context.Context, organizationID, projectID, workItemID string, status DeploymentStatus, kind string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, item := range s.deployments {
+		if item.OrganizationID != organizationID || item.ProjectID != projectID || item.WorkItemID != workItemID || item.Status != status {
+			continue
+		}
+		if kind == "" {
+			return true, nil
+		}
+		for _, environment := range s.environments[projectKey(organizationID, projectID)] {
+			if environment.ID == item.EnvironmentID && environment.Kind == kind {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 var _ Store = (*MemoryStore)(nil)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/forgeflow/forgeflow/backend/internal/agentrun"
 	"github.com/forgeflow/forgeflow/backend/internal/audit"
+	"github.com/forgeflow/forgeflow/backend/internal/branchplan"
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/httpapi"
@@ -26,6 +27,7 @@ type Service struct {
 	workItems   *workitem.Service
 	spec        *specification.Service
 	agentRuns   *agentrun.Service
+	branchPlans BranchPlanProvider
 	policy      PolicyProvider
 	recorder    MutationRecorder
 	transaction TransactionRunner
@@ -34,6 +36,15 @@ type Service struct {
 
 type PolicyProvider interface {
 	Policy(context.Context, string, string) (Policy, error)
+}
+
+type BranchPlanProvider interface {
+	GetPlan(context.Context, identity.Actor, string, string) (branchplan.Plan, error)
+	CreatePullRequest(context.Context, identity.Actor, string, string) (branchplan.Operation, error)
+}
+
+type branchPlanConfiguration interface {
+	Configured() bool
 }
 
 type MutationRecorder struct {
@@ -56,6 +67,7 @@ type Options struct {
 	Transaction TransactionRunner
 	Now         func() time.Time
 	Policy      PolicyProvider
+	BranchPlans BranchPlanProvider
 }
 
 func NewService(store Store, workItems *workitem.Service, spec *specification.Service, agentRuns *agentrun.Service, options ...Options) *Service {
@@ -69,7 +81,11 @@ func NewService(store Store, workItems *workitem.Service, spec *specification.Se
 	if configured.Now == nil {
 		configured.Now = func() time.Time { return time.Now().UTC() }
 	}
-	return &Service{store: store, workItems: workItems, spec: spec, agentRuns: agentRuns, policy: configured.Policy, recorder: configured.Recorder, transaction: configured.Transaction, now: configured.Now}
+	return &Service{store: store, workItems: workItems, spec: spec, agentRuns: agentRuns, branchPlans: configured.BranchPlans, policy: configured.Policy, recorder: configured.Recorder, transaction: configured.Transaction, now: configured.Now}
+}
+
+func (s *Service) SetBranchPlans(provider BranchPlanProvider) {
+	s.branchPlans = provider
 }
 
 func (s *Service) Start(ctx context.Context, actor identity.Actor, input StartInput) (Run, error) {
@@ -114,8 +130,26 @@ func (s *Service) Start(ctx context.Context, actor identity.Actor, input StartIn
 	if err != nil {
 		return Run{}, err
 	}
+	if item.Status == workflow.Raw {
+		transitionKey, transitionErr := s.workItems.RefinementTransitionKey(ctx, actor.OrganizationID, input.ProjectID)
+		if transitionErr != nil {
+			return Run{}, transitionErr
+		}
+		item, err = s.workItems.Transition(ctx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: input.ProjectID}, systemActor(actor.OrganizationID), item.ID, workitem.TransitionInput{TransitionKey: transitionKey, ExpectedVersion: item.Version})
+		if err != nil {
+			return Run{}, err
+		}
+	}
 	if input.RepositoryID == "" {
 		input.RepositoryID = item.RepositoryID
+	}
+	if s.branchPlans != nil {
+		if plan, planErr := s.branchPlans.GetPlan(ctx, actor, input.ProjectID, input.WorkItemID); planErr == nil && plan.State == branchplan.PlanReady {
+			input.BaseSHA = plan.BaseSHA
+			input.Branch = plan.WorkingBranch
+		} else if planErr != nil && apperr.From(planErr).Code != apperr.CodeNotFound {
+			return Run{}, planErr
+		}
 	}
 	if input.RepositoryID == "" {
 		return Run{}, apperr.New(apperr.CodeInvalidArgument, 422, "repository_id is required for autonomous code execution", nil)
@@ -237,7 +271,7 @@ func (s *Service) Cancel(ctx context.Context, actor identity.Actor, projectID, i
 	var updated Run
 	err = s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
 		if run.CurrentAgentRunID != "" && s.agentRuns != nil {
-			if _, cancelErr := s.agentRuns.Cancel(txCtx, systemActor(actor.OrganizationID), projectID, run.CurrentAgentRunID); cancelErr != nil {
+			if _, cancelErr := s.agentRuns.Cancel(txCtx, systemActor(actor.OrganizationID), projectID, run.CurrentAgentRunID); cancelErr != nil && apperr.From(cancelErr).Code != apperr.CodeConflict {
 				return cancelErr
 			}
 		}
@@ -345,7 +379,29 @@ func (s *Service) HandleAgentRunResult(ctx context.Context, actor identity.Actor
 		updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: StatusWaitingPRReview, Phase: PhasePullRequest, Gate: GatePullRequest, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: ""})
 		return updateErr
 	})
-	return updated, err
+	if err != nil || strings.TrimSpace(result.Error) != "" || s.branchPlans == nil {
+		return updated, err
+	}
+	if configured, ok := s.branchPlans.(branchPlanConfiguration); ok && !configured.Configured() {
+		return updated, nil
+	}
+	plan, planErr := s.branchPlans.GetPlan(ctx, systemActor(actor.OrganizationID), projectID, run.WorkItemID)
+	if planErr != nil {
+		return updated, planErr
+	}
+	if !plan.CreatePullRequest {
+		return updated, nil
+	}
+	operation, prErr := s.branchPlans.CreatePullRequest(ctx, systemActor(actor.OrganizationID), projectID, run.WorkItemID)
+	if prErr != nil {
+		message := "pull request creation failed; check the GitHub integration and retry"
+		failed, updateErr := s.updateState(ctx, actor, updated, StateUpdate{Status: updated.Status, Phase: updated.Phase, Gate: updated.Gate, CurrentAgentRunID: updated.CurrentAgentRunID, PullRequestID: updated.PullRequestID, CommitSHA: updated.CommitSHA, BaseSHA: updated.BaseSHA, Branch: updated.Branch, Attempt: updated.Attempt, UnresolvedPositions: updated.UnresolvedPositions, LastError: message})
+		if updateErr != nil {
+			return Run{}, updateErr
+		}
+		return failed, prErr
+	}
+	return s.updateState(ctx, actor, updated, StateUpdate{Status: updated.Status, Phase: updated.Phase, Gate: updated.Gate, CurrentAgentRunID: updated.CurrentAgentRunID, PullRequestID: operation.ID, CommitSHA: updated.CommitSHA, BaseSHA: updated.BaseSHA, Branch: updated.Branch, Attempt: updated.Attempt, UnresolvedPositions: updated.UnresolvedPositions, LastError: ""})
 }
 
 func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Run, retry bool) (Run, error) {
@@ -358,10 +414,26 @@ func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Ru
 		if txErr != nil {
 			return txErr
 		}
+		if retry && run.CurrentAgentRunID != "" && s.agentRuns != nil {
+			if _, cancelErr := s.agentRuns.Cancel(txCtx, systemActor(actor.OrganizationID), run.ProjectID, run.CurrentAgentRunID); cancelErr != nil && apperr.From(cancelErr).Code != apperr.CodeConflict {
+				return cancelErr
+			}
+		}
 		if item.Status == workflow.Ready {
 			if _, txErr = s.workItems.Transition(txCtx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: run.ProjectID}, systemActor(actor.OrganizationID), item.ID, workitem.TransitionInput{TransitionKey: "start_work", ExpectedVersion: item.Version}); txErr != nil {
 				return txErr
 			}
+		}
+		if s.branchPlans != nil {
+			plan, planErr := s.branchPlans.GetPlan(txCtx, systemActor(actor.OrganizationID), run.ProjectID, run.WorkItemID)
+			if planErr != nil {
+				return planErr
+			}
+			if plan.State != branchplan.PlanReady {
+				return apperr.New(apperr.CodeConflict, 409, "branch plan is not ready for autonomous execution", nil)
+			}
+			run.BaseSHA = plan.BaseSHA
+			run.Branch = plan.WorkingBranch
 		}
 		positions := append([]int(nil), run.UnresolvedPositions...)
 		policy := run.Policy.Normalize()
@@ -378,7 +450,7 @@ func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Ru
 			AgentProvider: run.AgentProvider, AgentName: run.AgentName, Model: run.Model,
 			BaseSHA: baseSHA, Branch: branch,
 			ExecutionInputs: agentrun.ExecutionInputs{Prompt: run.Objective + "\n\nAutonomous workflow attempt " + fmt.Sprint(run.Attempt+1) + ". Preserve passing test cases and fix only unresolved feedback.", TestCasePositions: positions, MCPPermissions: policy.MCPPermissions, ExecutionProfile: policy.ExecutionProfile, NetworkPolicy: policy.NetworkPolicy},
-			ExecutionPolicy: map[string]any{"autonomous": true, "workflow_id": run.ID, "runtime": policy.Runtime, "max_attempts": policy.MaxAttempts},
+			ExecutionPolicy: map[string]any{"autonomous": true, "workflow_id": run.ID, "runtime": policy.Runtime, "max_attempts": policy.MaxAttempts, "push_branch": policy.AutoCreatePR},
 		})
 		if createErr != nil {
 			return createErr
@@ -392,7 +464,7 @@ func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Ru
 			status = StatusFixing
 		}
 		var updateErr error
-		updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: status, Phase: PhaseImplementation, Gate: GateRunner, CurrentAgentRunID: started.ID, Attempt: run.Attempt + 1, UnresolvedPositions: positions, LastError: ""})
+		updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: status, Phase: PhaseImplementation, Gate: GateRunner, CurrentAgentRunID: started.ID, BaseSHA: baseSHA, Branch: branch, Attempt: run.Attempt + 1, UnresolvedPositions: positions, LastError: ""})
 		return updateErr
 	})
 	if err != nil {
@@ -405,7 +477,7 @@ func (s *Service) updateState(ctx context.Context, actor identity.Actor, run Run
 	var updated Run
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
 		var updateErr error
-		updated, updateErr = s.store.Update(txCtx, actor.OrganizationID, run.ProjectID, run.ID, StateUpdate{ExpectedVersion: run.Version, Status: input.Status, Phase: input.Phase, Gate: input.Gate, CurrentAgentRunID: input.CurrentAgentRunID, PullRequestID: input.PullRequestID, CommitSHA: input.CommitSHA, Attempt: input.Attempt, UnresolvedPositions: input.UnresolvedPositions, LastError: input.LastError, Finished: input.Finished})
+		updated, updateErr = s.store.Update(txCtx, actor.OrganizationID, run.ProjectID, run.ID, StateUpdate{ExpectedVersion: run.Version, Status: input.Status, Phase: input.Phase, Gate: input.Gate, CurrentAgentRunID: input.CurrentAgentRunID, PullRequestID: input.PullRequestID, CommitSHA: input.CommitSHA, BaseSHA: input.BaseSHA, Branch: input.Branch, Attempt: input.Attempt, UnresolvedPositions: input.UnresolvedPositions, LastError: input.LastError, Finished: input.Finished})
 		if updateErr != nil {
 			return updateErr
 		}

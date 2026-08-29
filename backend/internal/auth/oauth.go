@@ -97,10 +97,6 @@ func (h *OAuthHandler) callback(w http.ResponseWriter, r *http.Request) {
 		httpapiError(w, r, err)
 		return
 	}
-	if _, err := h.store.EnsureDefaultOrganization(r.Context(), userID, githubUser.ID, githubUser.Login); err != nil {
-		httpapiError(w, r, err)
-		return
-	}
 	_, sessionToken, err := h.sessions.CreateSession(r.Context(), userID, time.Now().UTC().Add(30*24*time.Hour))
 	if err != nil {
 		httpapiError(w, r, err)

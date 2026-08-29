@@ -1,6 +1,7 @@
 package workitem
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,10 +18,17 @@ import (
 )
 
 type Handler struct {
-	service     *Service
-	spec        *specification.Service
-	maxBody     int64
-	idempotency platformidempotency.Store
+	service            *Service
+	spec               *specification.Service
+	maxBody            int64
+	idempotency        platformidempotency.Store
+	projectScopeLookup ProjectScopeLookup
+}
+
+// ProjectScopeLookup supplies authoritative project metadata to adapters that
+// do not derive it from persistence during work-item creation.
+type ProjectScopeLookup interface {
+	ProjectScope(context.Context, identity.Actor, string) (workspaceID, projectKey string, err error)
 }
 
 func NewHandler(service *Service, spec *specification.Service, maxBody int64, developmentAuth ...bool) http.Handler {
@@ -45,7 +53,15 @@ func NewAPIHandler(service *Service, spec *specification.Service, maxBody int64,
 	if len(idempotencyStores) > 0 {
 		store = idempotencyStores[0]
 	}
-	h := &Handler{service: service, spec: spec, maxBody: maxBody, idempotency: store}
+	return newAPIHandler(service, spec, maxBody, store, nil)
+}
+
+func NewAPIHandlerWithProjectScopeLookup(service *Service, spec *specification.Service, maxBody int64, store platformidempotency.Store, lookup ProjectScopeLookup) http.Handler {
+	return newAPIHandler(service, spec, maxBody, store, lookup)
+}
+
+func newAPIHandler(service *Service, spec *specification.Service, maxBody int64, store platformidempotency.Store, lookup ProjectScopeLookup) http.Handler {
+	h := &Handler{service: service, spec: spec, maxBody: maxBody, idempotency: store, projectScopeLookup: lookup}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /work-items", h.list)
 	api.HandleFunc("POST /work-items", h.create)
@@ -82,19 +98,20 @@ func NewAPIHandler(service *Service, spec *specification.Service, maxBody int64,
 }
 
 type createRequest struct {
-	ProjectID      string `json:"project_id"`
-	WorkspaceID    string `json:"workspace_id"`
-	ProjectKey     string `json:"project_key"`
-	Type           Type   `json:"type"`
-	Title          string `json:"title"`
-	Description    string `json:"description"`
-	ParentID       string `json:"parent_id"`
-	RepositoryID   string `json:"repository_id"`
-	AssigneeID     string `json:"assignee_id"`
-	Priority       string `json:"priority"`
-	DueAt          string `json:"due_at"`
-	EstimatePoints *int   `json:"estimate_points"`
-	SprintID       string `json:"sprint_id"`
+	ProjectID      string    `json:"project_id"`
+	WorkspaceID    string    `json:"workspace_id"`
+	ProjectKey     string    `json:"project_key"`
+	Type           Type      `json:"type"`
+	Title          string    `json:"title"`
+	Description    string    `json:"description"`
+	ParentID       string    `json:"parent_id"`
+	RepositoryID   string    `json:"repository_id"`
+	AssigneeID     string    `json:"assignee_id"`
+	Priority       string    `json:"priority"`
+	RiskLevel      RiskLevel `json:"risk_level"`
+	DueAt          string    `json:"due_at"`
+	EstimatePoints *int      `json:"estimate_points"`
+	SprintID       string    `json:"sprint_id"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +130,17 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.ProjectID = scope.ProjectID
+	workspaceID := strings.TrimSpace(input.WorkspaceID)
+	projectKey := strings.TrimSpace(input.ProjectKey)
+	if h.projectScopeLookup != nil {
+		resolvedWorkspaceID, resolvedProjectKey, lookupErr := h.projectScopeLookup.ProjectScope(r.Context(), actor, scope.ProjectID)
+		if lookupErr == nil {
+			workspaceID, projectKey = resolvedWorkspaceID, resolvedProjectKey
+		} else if apperr.From(lookupErr).Code != apperr.CodeNotFound {
+			httpapi.Error(w, r, lookupErr)
+			return
+		}
+	}
 	dueAt, err := parseDueAt(input.DueAt)
 	if err != nil {
 		httpapi.Error(w, r, err)
@@ -139,7 +167,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 		claimed = true
 	}
-	item, err := h.service.Create(r.Context(), Scope{OrganizationID: scope.OrganizationID, WorkspaceID: input.WorkspaceID, ProjectID: scope.ProjectID, ProjectKey: input.ProjectKey}, actor, CreateInput{Type: input.Type, Title: input.Title, Description: input.Description, ParentID: input.ParentID, RepositoryID: input.RepositoryID, AssigneeID: input.AssigneeID, ReporterID: actor.ID, Priority: input.Priority, DueAt: dueAt, EstimatePoints: input.EstimatePoints, SprintID: input.SprintID})
+	item, err := h.service.Create(r.Context(), Scope{OrganizationID: scope.OrganizationID, WorkspaceID: workspaceID, ProjectID: scope.ProjectID, ProjectKey: projectKey}, actor, CreateInput{Type: input.Type, Title: input.Title, Description: input.Description, ParentID: input.ParentID, RepositoryID: input.RepositoryID, AssigneeID: input.AssigneeID, ReporterID: actor.ID, Priority: input.Priority, RiskLevel: input.RiskLevel, DueAt: dueAt, EstimatePoints: input.EstimatePoints, SprintID: input.SprintID})
 	if err != nil {
 		if claimed {
 			_ = h.idempotency.Release(r.Context(), actor.OrganizationID, actor.ID, key)
@@ -182,7 +210,8 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	includeArchived, _ := strconv.ParseBool(r.URL.Query().Get("include_archived"))
-	page, err := h.service.ListPage(r.Context(), scope, actor, ListFilter{Status: r.URL.Query().Get("status"), Type: r.URL.Query().Get("type"), Priority: r.URL.Query().Get("priority"), AssigneeID: r.URL.Query().Get("assignee_id"), SprintID: r.URL.Query().Get("sprint_id"), RepositoryID: r.URL.Query().Get("repository_id"), Query: query, Sort: r.URL.Query().Get("sort"), Limit: limit, Cursor: r.URL.Query().Get("cursor"), IncludeArchived: includeArchived})
+	excludeTerminal, _ := strconv.ParseBool(r.URL.Query().Get("exclude_terminal"))
+	page, err := h.service.ListPage(r.Context(), scope, actor, ListFilter{Status: r.URL.Query().Get("status"), Type: r.URL.Query().Get("type"), Priority: r.URL.Query().Get("priority"), AssigneeID: r.URL.Query().Get("assignee_id"), SprintID: r.URL.Query().Get("sprint_id"), RepositoryID: r.URL.Query().Get("repository_id"), Query: query, Sort: r.URL.Query().Get("sort"), Limit: limit, Cursor: r.URL.Query().Get("cursor"), IncludeArchived: includeArchived, ExcludeTerminal: excludeTerminal})
 	if err != nil {
 		httpapi.Error(w, r, err)
 		return
@@ -212,6 +241,7 @@ type updateRequest struct {
 	ExpectedVersion int64           `json:"expected_version"`
 	Status          json.RawMessage `json:"status"`
 	Priority        *string         `json:"priority"`
+	RiskLevel       *RiskLevel      `json:"risk_level"`
 	DueAt           optionalString  `json:"due_at"`
 	EstimatePoints  optionalInt     `json:"estimate_points"`
 	SprintID        optionalString  `json:"sprint_id"`
@@ -278,7 +308,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	item, err := h.service.Update(r.Context(), scope, actor, r.PathValue("id"), UpdateInput{Title: input.Title, Description: input.Description, ParentID: input.ParentID.Value, ParentIDSet: input.ParentID.Set, RepositoryID: input.RepositoryID.Value, RepositoryIDSet: input.RepositoryID.Set, Priority: input.Priority, DueAt: dueAt, DueAtSet: input.DueAt.Set, EstimatePoints: input.EstimatePoints.Value, EstimatePointsSet: input.EstimatePoints.Set, SprintID: input.SprintID.Value, SprintIDSet: input.SprintID.Set, ExpectedVersion: input.ExpectedVersion})
+	item, err := h.service.Update(r.Context(), scope, actor, r.PathValue("id"), UpdateInput{Title: input.Title, Description: input.Description, ParentID: input.ParentID.Value, ParentIDSet: input.ParentID.Set, RepositoryID: input.RepositoryID.Value, RepositoryIDSet: input.RepositoryID.Set, Priority: input.Priority, RiskLevel: input.RiskLevel, RiskLevelSet: input.RiskLevel != nil, DueAt: dueAt, DueAtSet: input.DueAt.Set, EstimatePoints: input.EstimatePoints.Value, EstimatePointsSet: input.EstimatePoints.Set, SprintID: input.SprintID.Value, SprintIDSet: input.SprintID.Set, ExpectedVersion: input.ExpectedVersion})
 	if err != nil {
 		httpapi.Error(w, r, err)
 		return

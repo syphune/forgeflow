@@ -74,6 +74,7 @@ describe("desktop AgentRun sync", () => {
     const snapshot = {
       repositoryID: "repo-1",
       baseCommit: "HEAD",
+      branch: "forgeflow/alice/feature/abc-1-change",
       worktree: "/managed/run-1",
       worktreeDiffHash: "diff-1",
       prompt: "Implement the approved change",
@@ -96,5 +97,14 @@ describe("desktop AgentRun sync", () => {
         execution_inputs: { prompt: snapshot.prompt, worktree_diff_hash: "diff-2" },
       },
     })).toThrow(/diff changed/);
+    expect(() => assertRemoteExecutionInputs(snapshot, {
+      run: {
+        id: "run-1",
+        status: "QUEUED",
+        agent_provider: "codex",
+        branch: "forgeflow/other/feature/abc-1-change",
+        execution_inputs: { prompt: snapshot.prompt, worktree_diff_hash: snapshot.worktreeDiffHash },
+      },
+    })).toThrow(/branch does not match/);
   });
 });

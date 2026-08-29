@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { assertPushableBranch, assertWithinRoot, repositoryDiff, validateBranchName, validateWorktreeName } from "./git";
+import { assertForgeflowBranch, assertPushableBranch, assertWithinRoot, branchNameForWorktree, cloneRepository, findLocalRepositories, repositoryDiff, validateBranchName, validateCommitMessage, validateWorktreeName } from "./git";
 
 const execFileAsync = promisify(execFile);
 
@@ -25,9 +25,56 @@ describe("managed worktree paths", () => {
 
   it("keeps branches safe and blocks protected branches", () => {
     expect(validateBranchName("forgeflow/task-123")).toBe("forgeflow/task-123");
+    expect(branchNameForWorktree("task-123")).toBe("forgeflow/task-123");
+    expect(assertForgeflowBranch("forgeflow/task-123")).toBe("forgeflow/task-123");
     expect(assertPushableBranch("forgeflow/task-123")).toBe("forgeflow/task-123");
     expect(() => validateBranchName("../secrets")).toThrow();
+    expect(() => assertForgeflowBranch("feature/task-123")).toThrow();
     expect(() => assertPushableBranch("main")).toThrow();
+  });
+
+  it("enforces the commit message rule", () => {
+    expect(validateCommitMessage("fix: handle an empty invoice")).toBe("fix: handle an empty invoice");
+    expect(() => validateCommitMessage("Implement approved change")).toThrow();
+  });
+
+  it("finds repositories directly inside a local code folder", async () => {
+    const root = await fs.mkdtemp(`${os.tmpdir()}/forgeflow-projects-`);
+    const repository = `${root}/billing-service`;
+    try {
+      await fs.mkdir(repository);
+      await execFileAsync("git", ["-C", repository, "init", "-q"]);
+      const found = await findLocalRepositories(root);
+      expect(found.map((item) => item.root)).toEqual([await fs.realpath(repository)]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects clone credentials with an embedded URL token", async () => {
+    const root = await fs.mkdtemp(`${os.tmpdir()}/forgeflow-clone-`);
+    try {
+      await expect(cloneRepository(root, "app", {
+        cloneURL: "https://x-access-token:secret@github.com/acme/app.git",
+        username: "x-access-token",
+        token: "secret",
+      })).rejects.toThrow(/clone URL is invalid/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed credentials before invoking Git", async () => {
+    const root = await fs.mkdtemp(`${os.tmpdir()}/forgeflow-clone-`);
+    try {
+      await expect(cloneRepository(root, "app", {
+        cloneURL: "https://github.com/acme/app.git",
+        username: undefined as never,
+        token: "secret",
+      })).rejects.toThrow(/credential is invalid/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("includes untracked files in the review diff", async () => {

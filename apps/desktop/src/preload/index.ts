@@ -16,6 +16,7 @@ type AgentRequest = {
   approved: boolean;
   repositoryID?: string;
   baseCommit?: string;
+  branch?: string;
   worktreeDiffHash?: string;
   specificationVersion?: number;
   timeoutMs?: number;
@@ -53,10 +54,21 @@ contextBridge.exposeInMainWorld("forgeflow", {
     ipcRenderer.invoke("forgeflow:auth-sign-in", apiBaseURL),
   signOut: (): Promise<{ signedIn: boolean; apiBaseURL: string }> =>
     ipcRenderer.invoke("forgeflow:auth-sign-out"),
+  authorizeGitHubCode: (request: { apiBaseURL: string; projectID: string }): Promise<{ authorized: boolean }> =>
+    ipcRenderer.invoke("forgeflow:github-code-authorize", request),
   chooseRepository: (): Promise<string> =>
     ipcRenderer.invoke("forgeflow:choose-repository"),
   repositoryStatus: (root: string): Promise<RepositoryStatus> =>
     ipcRenderer.invoke("forgeflow:repository-status", root),
+  findRepositories: (root: string): Promise<RepositoryStatus[]> =>
+    ipcRenderer.invoke("forgeflow:find-repositories", root),
+  cloneRepository: (request: {
+    root: string;
+    name: string;
+    apiBaseURL: string;
+    projectID: string;
+    repositoryID: string;
+  }): Promise<RepositoryStatus> => ipcRenderer.invoke("forgeflow:clone-repository", request),
   repositoryDiff: (root: string): Promise<RepositoryDiff> =>
     ipcRenderer.invoke("forgeflow:repository-diff", root),
   createWorktree: (request: {
@@ -70,8 +82,12 @@ contextBridge.exposeInMainWorld("forgeflow", {
     ipcRenderer.invoke("forgeflow:remove-worktree", candidate),
   commitWorktree: (request: { candidate: string; message: string }): Promise<RepositoryCommit> =>
     ipcRenderer.invoke("forgeflow:commit-worktree", request),
-  pushWorktree: (candidate: string): Promise<RepositoryStatus> =>
-    ipcRenderer.invoke("forgeflow:push-worktree", candidate),
+  pushWorktree: (request: {
+    candidate: string;
+    apiBaseURL: string;
+    projectID: string;
+    repositoryID: string;
+  }): Promise<RepositoryStatus> => ipcRenderer.invoke("forgeflow:push-worktree", request),
   runAgent: (request: AgentRequest): Promise<AgentResult> =>
     ipcRenderer.invoke("forgeflow:agent-run", request),
   cancelAgent: (runID: string): Promise<{ cancelled: boolean }> =>
@@ -87,8 +103,17 @@ declare global {
       authStatus(): Promise<{ signedIn: boolean; apiBaseURL: string }>;
       signIn(apiBaseURL: string): Promise<{ signedIn: boolean; apiBaseURL: string }>;
       signOut(): Promise<{ signedIn: boolean; apiBaseURL: string }>;
+      authorizeGitHubCode(request: { apiBaseURL: string; projectID: string }): Promise<{ authorized: boolean }>;
       chooseRepository(): Promise<string>;
       repositoryStatus(root: string): Promise<RepositoryStatus>;
+      findRepositories(root: string): Promise<RepositoryStatus[]>;
+      cloneRepository(request: {
+        root: string;
+        name: string;
+        apiBaseURL: string;
+        projectID: string;
+        repositoryID: string;
+      }): Promise<RepositoryStatus>;
       repositoryDiff(root: string): Promise<RepositoryDiff>;
       createWorktree(request: {
         sourceRoot: string;
@@ -98,7 +123,12 @@ declare global {
       }): Promise<RepositoryStatus>;
       removeWorktree(candidate: string): Promise<void>;
       commitWorktree(request: { candidate: string; message: string }): Promise<RepositoryCommit>;
-      pushWorktree(candidate: string): Promise<RepositoryStatus>;
+      pushWorktree(request: {
+        candidate: string;
+        apiBaseURL: string;
+        projectID: string;
+        repositoryID: string;
+      }): Promise<RepositoryStatus>;
       runAgent(request: AgentRequest): Promise<AgentResult>;
       cancelAgent(runID: string): Promise<{ cancelled: boolean }>;
       agentRecoveries(): Promise<AgentRecovery[]>;

@@ -19,6 +19,9 @@ type ToolDefinition struct {
 }
 
 var definitions = []ToolDefinition{
+	{Name: "project.list", Description: "List projects available to the authenticated account. Use this when the user has not identified exactly one project, then ask the user to choose one before any project-scoped operation.", InputSchema: objectSchema()},
+	{Name: "sprint.list", Description: "List sprint or iteration IDs, names, statuses, and briefs in an authorized project scope. Call this before planning work.", InputSchema: objectSchema()},
+	{Name: "sprint.get_context", Description: "Read one sprint or iteration brief and its authorized work items. Use sprint.list first to obtain the sprint ID.", InputSchema: objectSchema("id")},
 	{Name: "work_item.list", Description: "List work items in an authorized project scope.", InputSchema: objectSchema()},
 	{Name: "work_item.search", Description: "Search authorized work items using bounded lexical filters.", InputSchema: objectSchema()},
 	{Name: "work_item.get", Description: "Get one authorized work item.", InputSchema: objectSchema("id")},
@@ -35,12 +38,12 @@ var definitions = []ToolDefinition{
 	{Name: "specification.reject_proposal", Description: "Reject a pending AI proposal without changing verified specification content.", InputSchema: objectSchema("work_item_id", "proposal_id")},
 	{Name: "specification.verify_field", Description: "Explicit human-only verification; agent actors are denied.", InputSchema: objectSchema("work_item_id", "field")},
 	{Name: "specification.request_clarification", Description: "Request human clarification for an incomplete specification.", InputSchema: objectSchema("work_item_id", "question")},
-	{Name: "repository.get", Description: "Read authorized repository metadata.", InputSchema: objectSchema("repository_id")},
-	{Name: "repository.get_structure", Description: "Read a bounded repository tree, preferring the latest fixed-commit snapshot.", InputSchema: objectSchema("repository_id")},
-	{Name: "repository.search_code", Description: "Search the latest fixed-commit repository snapshot with bounded lexical results.", InputSchema: objectSchema("repository_id", "query")},
-	{Name: "repository.get_file", Description: "Read one bounded authorized file from the linked default branch.", InputSchema: objectSchema("repository_id", "path")},
-	{Name: "repository.get_symbol", Description: "Find an extracted symbol in the latest fixed-commit snapshot.", InputSchema: objectSchema("repository_id", "symbol")},
-	{Name: "repository.related_files", Description: "Read parser-proven related files only.", InputSchema: objectSchema("repository_id", "path")},
+	{Name: "repository.get", Description: "Read metadata from the linked GitHub repository.", InputSchema: objectSchema("repository_id")},
+	{Name: "repository.get_structure", Description: "Read the current bounded tree from the linked GitHub repository default branch; never read a local workspace or persisted snapshot.", InputSchema: objectSchema("repository_id")},
+	{Name: "repository.search_code", Description: "Search the current linked GitHub repository default branch; never search a local workspace or persisted snapshot.", InputSchema: objectSchema("repository_id", "query")},
+	{Name: "repository.get_file", Description: "Read one bounded file directly from the linked GitHub repository default branch.", InputSchema: objectSchema("repository_id", "path")},
+	{Name: "repository.get_symbol", Description: "Find a symbol candidate by searching the current linked GitHub repository.", InputSchema: objectSchema("repository_id", "symbol")},
+	{Name: "repository.related_files", Description: "Read related files from the current linked GitHub repository tree.", InputSchema: objectSchema("repository_id", "path")},
 	{Name: "repository.related_commits", Description: "Read related commits from authorized repository history.", InputSchema: objectSchema("repository_id", "path")},
 	{Name: "repository.related_pull_requests", Description: "Read related pull requests from authorized repository history.", InputSchema: objectSchema("repository_id", "path")},
 	{Name: "agent_run.get", Description: "Read an authorized AgentRun and its bounded artifacts.", InputSchema: objectSchema("id")},
@@ -120,7 +123,8 @@ func Register(server *sdk.Server, logger *slog.Logger, adapters ...Adapter) {
 func objectSchema(required ...string) map[string]any {
 	properties := map[string]any{
 		"id":                    map[string]any{"type": "string"},
-		"project_id":            map[string]any{"type": "string"},
+		"project_id":            map[string]any{"type": "string", "description": "Project to operate on. Required when the user has not already selected exactly one project."},
+		"workspace_id":          map[string]any{"type": "string"},
 		"work_item_id":          map[string]any{"type": "string"},
 		"repository_id":         map[string]any{"type": "string"},
 		"proposal_id":           map[string]any{"type": "string"},
@@ -128,6 +132,7 @@ func objectSchema(required ...string) map[string]any {
 		"title":                 map[string]any{"type": "string"},
 		"description":           map[string]any{"type": "string"},
 		"priority":              map[string]any{"type": "string", "enum": []string{"LOWEST", "LOW", "MEDIUM", "HIGH", "HIGHEST"}},
+		"risk_level":            map[string]any{"type": "string", "enum": []string{"LOW", "NORMAL", "HIGH", "CRITICAL"}},
 		"due_at":                map[string]any{"type": "string", "format": "date-time"},
 		"estimate_points":       map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
 		"sprint_id":             map[string]any{"type": "string"},

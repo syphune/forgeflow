@@ -21,12 +21,18 @@ type Workspace struct {
 }
 
 type Project struct {
-	ID             string    `json:"id"`
-	OrganizationID string    `json:"organization_id"`
-	WorkspaceID    string    `json:"workspace_id"`
-	Key            string    `json:"key"`
-	DisplayName    string    `json:"display_name"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	OrganizationID     string    `json:"organization_id"`
+	WorkspaceID        string    `json:"workspace_id"`
+	Key                string    `json:"key"`
+	DisplayName        string    `json:"display_name"`
+	DoneVisibilityDays int       `json:"done_visibility_days"`
+	CreatedAt          time.Time `json:"created_at"`
+}
+
+type ProjectBoardSettings struct {
+	ProjectID          string `json:"project_id"`
+	DoneVisibilityDays int    `json:"done_visibility_days"`
 }
 
 type Member struct {
@@ -39,6 +45,7 @@ type Member struct {
 
 type Store interface {
 	Organization(context.Context, string) (*Organization, error)
+	CreateOrganization(context.Context, string, string, string) (Organization, error)
 	Workspace(context.Context, string, string) (*Workspace, error)
 	Project(context.Context, string, string) (*Project, error)
 	ListOrganizations(context.Context, string) ([]Organization, error)
@@ -48,6 +55,7 @@ type Store interface {
 	ListProjects(context.Context, string, string) ([]Project, error)
 	CreateProject(context.Context, string, string, string, string, string) (Project, error)
 	UpdateProject(context.Context, string, string, string) (Project, error)
+	UpdateProjectDoneVisibilityDays(context.Context, string, string, int) (Project, error)
 	ListMembers(context.Context, string, string) ([]Member, error)
 	SetProjectMember(context.Context, string, string, string, string) (Member, error)
 	RemoveProjectMember(context.Context, string, string, string) error

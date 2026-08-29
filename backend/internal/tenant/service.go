@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"time"
 
@@ -50,12 +51,18 @@ var roleKeys = map[string]struct{}{
 	"project_manager": {},
 	"developer":       {},
 	"qa":              {},
+	"security_reviewer": {},
+	"release_approver": {},
 	"viewer":          {},
 }
 
+var doneVisibilityDays = map[int]struct{}{0: {}, 7: {}, 14: {}, 30: {}, 60: {}}
+
+var organizationSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
 func validateRoleKey(value string) error {
 	if _, ok := roleKeys[value]; !ok {
-		return apperr.New(apperr.CodeInvalidArgument, 422, "role_key is invalid", map[string]any{"allowed": []string{"owner", "admin", "project_manager", "developer", "qa", "viewer"}})
+		return apperr.New(apperr.CodeInvalidArgument, 422, "role_key is invalid", map[string]any{"allowed": []string{"owner", "admin", "project_manager", "developer", "qa", "security_reviewer", "release_approver", "viewer"}})
 	}
 	return nil
 }
@@ -79,8 +86,13 @@ func NewService(store Store, options ...Options) *Service {
 }
 
 func (s *Service) Organizations(ctx context.Context, actor identity.Actor) ([]Organization, error) {
-	if err := require(actor, identity.CapabilityOrganizationRead); err != nil {
-		return nil, err
+	if strings.TrimSpace(actor.ID) == "" {
+		return nil, apperr.New(apperr.CodeUnauthorized, 401, "authenticated actor is required", nil)
+	}
+	if strings.TrimSpace(actor.OrganizationID) != "" {
+		if err := require(actor, identity.CapabilityOrganizationRead); err != nil {
+			return nil, err
+		}
 	}
 	if actor.Source == "pat" {
 		organization, err := s.store.Organization(ctx, actor.OrganizationID)
@@ -90,6 +102,32 @@ func (s *Service) Organizations(ctx context.Context, actor identity.Actor) ([]Or
 		return []Organization{*organization}, nil
 	}
 	return s.store.ListOrganizations(ctx, actor.ID)
+}
+
+func (s *Service) CreateOrganization(ctx context.Context, actor identity.Actor, slug, displayName string) (Organization, error) {
+	if strings.TrimSpace(actor.ID) == "" {
+		return Organization{}, apperr.New(apperr.CodeUnauthorized, 401, "authenticated actor is required", nil)
+	}
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	if !organizationSlugPattern.MatchString(slug) {
+		return Organization{}, apperr.New(apperr.CodeInvalidArgument, 422, "slug must contain 1-63 lowercase letters, numbers, or hyphens", nil)
+	}
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" || len(displayName) > 160 {
+		return Organization{}, apperr.New(apperr.CodeInvalidArgument, 422, "display_name is required and must be at most 160 characters", nil)
+	}
+	var item Organization
+	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		var err error
+		item, err = s.store.CreateOrganization(txCtx, slug, displayName, actor.ID)
+		if err != nil {
+			return err
+		}
+		recordActor := actor
+		recordActor.OrganizationID = item.ID
+		return s.record(txCtx, recordActor, "organization.created", "organization", item.ID, nil, item)
+	})
+	return item, err
 }
 
 func (s *Service) Organization(ctx context.Context, actor identity.Actor) (*Organization, error) {
@@ -191,6 +229,17 @@ func (s *Service) Projects(ctx context.Context, actor identity.Actor, workspaceI
 	return s.store.ListProjects(ctx, actor.OrganizationID, strings.TrimSpace(workspaceID))
 }
 
+func (s *Service) ProjectScope(ctx context.Context, actor identity.Actor, projectID string) (string, string, error) {
+	if err := require(actor, identity.CapabilityProjectRead); err != nil {
+		return "", "", err
+	}
+	project, err := s.store.Project(ctx, actor.OrganizationID, strings.TrimSpace(projectID))
+	if err != nil {
+		return "", "", err
+	}
+	return project.WorkspaceID, project.Key, nil
+}
+
 func (s *Service) CreateProject(ctx context.Context, actor identity.Actor, workspaceID, key, displayName string) (Project, error) {
 	if err := require(actor, identity.CapabilityProjectManage); err != nil {
 		return Project{}, err
@@ -234,6 +283,53 @@ func (s *Service) UpdateProject(ctx context.Context, actor identity.Actor, id, d
 		return s.record(txCtx, actor, "project.updated", "project", item.ID, nil, item)
 	})
 	return item, err
+}
+
+func (s *Service) GetProjectBoardSettings(ctx context.Context, actor identity.Actor, id string) (ProjectBoardSettings, error) {
+	if err := require(actor, identity.CapabilityProjectRead); err != nil {
+		return ProjectBoardSettings{}, err
+	}
+	project, err := s.store.Project(ctx, actor.OrganizationID, strings.TrimSpace(id))
+	if err != nil {
+		return ProjectBoardSettings{}, err
+	}
+	return ProjectBoardSettings{ProjectID: project.ID, DoneVisibilityDays: project.DoneVisibilityDays}, nil
+}
+
+func (s *Service) ProjectBoardVisibilityDays(ctx context.Context, actor identity.Actor, id string) (int, error) {
+	settings, err := s.GetProjectBoardSettings(ctx, actor, id)
+	if err != nil {
+		return 0, err
+	}
+	return settings.DoneVisibilityDays, nil
+}
+
+func (s *Service) UpdateProjectBoardSettings(ctx context.Context, actor identity.Actor, id string, days int) (ProjectBoardSettings, error) {
+	if err := require(actor, identity.CapabilityProjectManage); err != nil {
+		return ProjectBoardSettings{}, err
+	}
+	if strings.TrimSpace(id) == "" {
+		return ProjectBoardSettings{}, apperr.New(apperr.CodeInvalidArgument, 422, "project id is required", nil)
+	}
+	if _, ok := doneVisibilityDays[days]; !ok {
+		return ProjectBoardSettings{}, apperr.New(apperr.CodeInvalidArgument, 422, "done_visibility_days must be one of 0, 7, 14, 30, or 60", nil)
+	}
+	var project Project
+	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		before, err := s.store.Project(txCtx, actor.OrganizationID, strings.TrimSpace(id))
+		if err != nil {
+			return err
+		}
+		project, err = s.store.UpdateProjectDoneVisibilityDays(txCtx, actor.OrganizationID, strings.TrimSpace(id), days)
+		if err != nil {
+			return err
+		}
+		return s.record(txCtx, actor, "project.board_settings.updated", "project", project.ID, before, project)
+	})
+	if err != nil {
+		return ProjectBoardSettings{}, err
+	}
+	return ProjectBoardSettings{ProjectID: project.ID, DoneVisibilityDays: project.DoneVisibilityDays}, nil
 }
 
 func (s *Service) Members(ctx context.Context, actor identity.Actor, projectID string) ([]Member, error) {

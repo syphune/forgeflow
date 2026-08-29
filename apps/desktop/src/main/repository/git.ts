@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT = 256 * 1024;
+export const DEFAULT_BRANCH_PREFIX = "forgeflow/";
 
 export type RepositoryStatus = {
   root: string;
@@ -20,6 +21,16 @@ export type RepositoryDiff = {
 };
 
 export type RepositoryCommit = RepositoryStatus & { commitSHA: string };
+
+export type GitCredential = {
+  cloneURL: string;
+  username: string;
+  token: string;
+};
+
+export function branchNameForWorktree(name: string): string {
+  return `${DEFAULT_BRANCH_PREFIX}${validateWorktreeName(name)}`;
+}
 
 export async function repositoryStatus(
   root: string,
@@ -45,6 +56,58 @@ export async function repositoryStatus(
     .filter((line) => !line.startsWith("## ") && line.length > 0)
     .join("\n");
   return { root: safeRoot, branch, clean: porcelain.length === 0, porcelain };
+}
+
+export async function findLocalRepositories(root: string): Promise<RepositoryStatus[]> {
+  const safeRoot = await resolveDirectory(root);
+  const entries = await fs.readdir(safeRoot, { withFileTypes: true });
+  const candidates = [safeRoot];
+  // ponytail: scan the first 100 direct children; add indexed/deep discovery if code folders need more.
+  for (const entry of entries.slice(0, 100)) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(safeRoot, entry.name);
+    try {
+      await fs.lstat(path.join(candidate, ".git"));
+      candidates.push(candidate);
+    } catch {
+      // A code folder can contain non-repository directories.
+    }
+  }
+  const repositories: RepositoryStatus[] = [];
+  for (const candidate of candidates) {
+    try {
+      repositories.push(await repositoryStatus(candidate));
+    } catch {
+      // Ignore directories that are not readable Git repositories.
+    }
+  }
+  return repositories;
+}
+
+export async function cloneRepository(
+  managedRoot: string,
+  name: string,
+  credential: GitCredential,
+): Promise<RepositoryStatus> {
+  const safeRoot = await resolveDirectory(managedRoot);
+  const safeName = validateWorktreeName(name);
+  const cloneURL = validateCloneURL(credential.cloneURL);
+  validateGitCredential(credential);
+  const target = assertWithinRoot(safeRoot, path.join(safeRoot, safeName));
+  try {
+    await fs.lstat(target);
+    throw new Error("clone destination already exists");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await execFileAsync("git", ["clone", "--depth", "1", cloneURL, target], {
+    shell: false,
+    timeout: 10 * 60_000,
+    maxBuffer: MAX_OUTPUT,
+    windowsHide: true,
+    env: gitEnvironment(credential),
+  });
+  return repositoryStatus(target);
 }
 
 export async function repositoryDiff(root: string): Promise<RepositoryDiff> {
@@ -154,8 +217,30 @@ export function validateBranchName(name: string): string {
   return value;
 }
 
-export function assertPushableBranch(branch: string): string {
+export function assertForgeflowBranch(branch: string): string {
   const value = validateBranchName(branch);
+  if (!value.toLowerCase().startsWith(DEFAULT_BRANCH_PREFIX)) {
+    throw new Error(`working branches must use the ${DEFAULT_BRANCH_PREFIX} prefix`);
+  }
+  return value;
+}
+
+export function validateCommitMessage(message: string): string {
+  const value = message.trim();
+  const subject = value.split("\n", 1)[0].trim();
+  if (
+    !value ||
+    value.length > 200 ||
+    value.includes("\0") ||
+    !/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9._/-]+\))?!?:\s+\S.*$/i.test(subject)
+  ) {
+    throw new Error("commit message must use Conventional Commits and be at most 200 characters");
+  }
+  return value;
+}
+
+export function assertPushableBranch(branch: string): string {
+  const value = assertForgeflowBranch(branch);
   if (["main", "master", "develop", "production", "release"].includes(value.toLowerCase())) {
     throw new Error("protected branches cannot be pushed by Forgeflow");
   }
@@ -172,7 +257,7 @@ export async function createManagedWorktree(
   const safeRoot = await resolveDirectory(managedRoot);
   const source = await resolveDirectory(sourceRoot);
   const safeName = validateWorktreeName(name);
-  const branch = validateBranchName(branchName?.trim() || `forgeflow/${safeName}`);
+  const branch = assertForgeflowBranch(branchName?.trim() || branchNameForWorktree(safeName));
   const ref = baseRef.trim() || "HEAD";
   if (ref.length > 256 || ref.includes("\0") || ref.startsWith("-"))
     throw new Error("base ref is invalid");
@@ -201,10 +286,7 @@ export async function commitWorktree(
   message: string,
 ): Promise<RepositoryCommit> {
   const safeCandidate = await resolveDirectory(candidate);
-  const safeMessage = message.trim();
-  if (!safeMessage || safeMessage.length > 200 || safeMessage.includes("\0")) {
-    throw new Error("commit message is required and bounded");
-  }
+  const safeMessage = validateCommitMessage(message);
   const status = await repositoryStatus(safeCandidate);
   if (status.clean) throw new Error("there are no changes to commit");
   await execFileAsync("git", ["-C", safeCandidate, "add", "--all", "--", "."], {
@@ -228,16 +310,80 @@ export async function commitWorktree(
   return { ...(await repositoryStatus(safeCandidate)), commitSHA: commit.stdout.trim() };
 }
 
-export async function pushWorktree(candidate: string): Promise<RepositoryStatus> {
+export async function pushWorktree(candidate: string, credential?: GitCredential): Promise<RepositoryStatus> {
   const safeCandidate = await resolveDirectory(candidate);
   const branch = assertPushableBranch((await repositoryStatus(safeCandidate)).branch);
+  if (credential) {
+    const cloneURL = validateCloneURL(credential.cloneURL);
+    validateGitCredential(credential);
+    await execFileAsync("git", ["-C", safeCandidate, "remote", "set-url", "origin", cloneURL], {
+      shell: false,
+      timeout: 10_000,
+      maxBuffer: MAX_OUTPUT,
+      windowsHide: true,
+    });
+  }
   await execFileAsync("git", ["-C", safeCandidate, "push", "--set-upstream", "origin", branch], {
     shell: false,
     timeout: 120_000,
     maxBuffer: MAX_OUTPUT,
     windowsHide: true,
+    ...(credential ? { env: gitEnvironment(credential) } : {}),
   });
   return repositoryStatus(safeCandidate);
+}
+
+function validateGitCredential(credential: GitCredential): void {
+  if (
+    !credential ||
+    typeof credential !== "object" ||
+    typeof credential.username !== "string" ||
+    typeof credential.token !== "string" ||
+    credential.username.length > 128 ||
+    credential.token.length > 4096 ||
+    !credential.username.trim() ||
+    !credential.token.trim() ||
+    /[\0\r\n]/.test(credential.username) ||
+    /[\0\r\n]/.test(credential.token)
+  ) {
+    throw new Error("GitHub clone credential is invalid");
+  }
+}
+
+function validateCloneURL(value: string): string {
+  let parsed: URL;
+  try {
+    if (typeof value !== "string") throw new Error("invalid clone URL");
+    parsed = new URL(value.trim());
+  } catch {
+    throw new Error("GitHub clone URL is invalid");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname !== "github.com" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    !/^\/[^/]+\/[^/]+(?:\.git)?$/.test(parsed.pathname)
+  ) {
+    throw new Error("GitHub clone URL is invalid");
+  }
+  return parsed.toString();
+}
+
+function gitEnvironment(credential?: GitCredential): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  if (credential) {
+    for (const key of Object.keys(environment)) {
+      if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(key) || /^GIT_TRACE(?:2(?:_|$)|_|$)/.test(key) || key === "GIT_CURL_VERBOSE") delete environment[key];
+    }
+    const basic = Buffer.from(`${credential.username}:${credential.token}`, "utf8").toString("base64");
+    environment.GIT_CONFIG_COUNT = "1";
+    environment.GIT_CONFIG_KEY_0 = "http.extraHeader";
+    environment.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${basic}`;
+  }
+  return environment;
 }
 
 export async function removeManagedWorktree(

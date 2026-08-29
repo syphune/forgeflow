@@ -132,19 +132,20 @@ func (s *PostgresStore) Get(ctx context.Context, organizationID, projectID, work
 		return nil, fmt.Errorf("iterate acceptance criteria: %w", err)
 	}
 
-	rows, err = exec.Query(ctx, `SELECT position, scenario, expected_result, provenance, verification_status, COALESCE(verified_by::text,''), verified_at FROM specification_regression_cases WHERE specification_id=$1 ORDER BY position`, spec.ID)
+	rows, err = exec.Query(ctx, `SELECT position, scenario, expected_result, gate_class, provenance, verification_status, COALESCE(verified_by::text,''), verified_at FROM specification_regression_cases WHERE specification_id=$1 ORDER BY position`, spec.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load regression test cases: %w", err)
 	}
 	for rows.Next() {
 		var testCase RegressionTestCase
-		var provenance, verification, verifiedBy string
+		var gateClass, provenance, verification, verifiedBy string
 		var verifiedAt *time.Time
-		if err := rows.Scan(&testCase.Position, &testCase.Scenario, &testCase.ExpectedResult, &provenance, &verification, &verifiedBy, &verifiedAt); err != nil {
+		if err := rows.Scan(&testCase.Position, &testCase.Scenario, &testCase.ExpectedResult, &gateClass, &provenance, &verification, &verifiedBy, &verifiedAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan regression test case: %w", err)
 		}
 		testCase.Provenance = Provenance(provenance)
+		testCase.GateClass = normalizeGateClass(GateClass(gateClass))
 		testCase.VerificationStatus = VerificationStatus(verification)
 		testCase.VerifiedBy = verifiedBy
 		if verifiedAt != nil {
@@ -362,7 +363,7 @@ func (s *PostgresStore) save(ctx context.Context, exec platformdb.Executor, orga
 		if testCase.VerifiedAt != nil {
 			verifiedAt = *testCase.VerifiedAt
 		}
-		if _, err := exec.Exec(ctx, `INSERT INTO specification_regression_cases (specification_id, position, scenario, expected_result, provenance, verification_status, verified_by, verified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, spec.ID, testCase.Position, testCase.Scenario, testCase.ExpectedResult, testCase.Provenance, testCase.VerificationStatus, verifiedBy, verifiedAt); err != nil {
+		if _, err := exec.Exec(ctx, `INSERT INTO specification_regression_cases (specification_id, position, scenario, expected_result, gate_class, provenance, verification_status, verified_by, verified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, spec.ID, testCase.Position, testCase.Scenario, testCase.ExpectedResult, normalizeGateClass(testCase.GateClass), testCase.Provenance, testCase.VerificationStatus, verifiedBy, verifiedAt); err != nil {
 			return fmt.Errorf("insert regression test case: %w", err)
 		}
 	}

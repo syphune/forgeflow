@@ -1,25 +1,47 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AcceptanceCriterion, Attachment, GitHubRepository, RepositoryContext, RepositorySnapshot, RepositoryTreeEntry, ReproductionStep, SnapshotSymbol, Specification, SpecificationResponse, VerificationRequest, WorkItem } from "@forgeflow/api-client";
+import type { AcceptanceCriterion, Attachment, GitHubRepository, RepositoryContext, RepositorySnapshot, RepositoryTreeEntry, ReproductionStep, SnapshotSymbol, Specification, SpecificationResponse, VerificationRequest, WorkItem, WorkflowResponse } from "@forgeflow/api-client";
 import { translate as t } from "@forgeflow/ui";
-import { apiErrorMessage, browserAPI } from "../app/api";
+import { apiErrorMessage, browserAPI, isRepositoryEmptyError } from "../app/api";
 import { optimizeAttachment } from "../../app/attachment-optimization";
 import { ForgeSelect } from "../app/forge-select";
 import type { SelectOption } from "../app/forge-select";
 import { uiTone } from "../app/types";
 
 type Props = {
-  projectID: string;
-  item: WorkItem;
-  response: SpecificationResponse | null;
-  onSaved: (response: SpecificationResponse) => void;
-  onError: (message: string) => void;
+	projectID: string;
+	item: WorkItem;
+	response: SpecificationResponse | null;
+	workflow?: WorkflowResponse | null;
+	onSaved: (response: SpecificationResponse) => void;
+	onError: (message: string) => void;
 };
+
+export type SpecificationWorkflowPhase = "RAW" | "REFINING" | "REVIEW" | "LOCKED";
+
+export function specificationWorkflowPhase(status: string, workflow?: WorkflowResponse | null): SpecificationWorkflowPhase {
+  if (status === "RAW") return "RAW";
+  if (!workflow) return status === "REVIEW_REQUIRED" ? "REVIEW" : status === "REFINING" ? "REFINING" : "LOCKED";
+  const current = workflow.statuses.find((candidate) => candidate.key === status);
+  if (!current) return "LOCKED";
+  let review = status === "REVIEW_REQUIRED";
+  let locked = status === "READY";
+  for (const transition of workflow.transitions) {
+    const requiresSpecification = transition.required_rules?.includes("require_specification_ready") ?? false;
+    if (requiresSpecification && transition.from_status === status) review = true;
+    if ((requiresSpecification || transition.to_status === "READY") && transition.to_status === status) locked = true;
+  }
+  if (locked) return "LOCKED";
+  if (review) return "REVIEW";
+  return current.category === "TODO" && !current.is_terminal ? "REFINING" : "LOCKED";
+}
 
 type DraftStep = { action: string; expected_result: string; observed_result: string; evidence_refs: string };
 type DraftCriterion = { statement: string };
-type DraftRegression = { scenario: string; expected_result: string };
+const regressionGateClasses = ["REQUIRED", "OPTIONAL", "INFORMATIONAL"] as const;
+type RegressionGateClass = typeof regressionGateClasses[number];
+type DraftRegression = { scenario: string; expected_result: string; gate_class: RegressionGateClass };
 type DraftContextRef = { module: string; file: string; symbol: string; commit: string; pull_request: string; rationale: string };
 type RepositoryContextData = { repositoryID: string; context: RepositoryContext; tree: RepositoryTreeEntry[]; snapshot: RepositorySnapshot | null; symbols: SnapshotSymbol[] };
 const manualOptionValue = "__manual__";
@@ -59,8 +81,9 @@ function draftCriterion(criterion?: AcceptanceCriterion): DraftCriterion {
   return { statement: criterion?.statement ?? "" };
 }
 
-function draftRegression(testCase?: { scenario?: string; expected_result?: string }): DraftRegression {
-  return { scenario: testCase?.scenario ?? "", expected_result: testCase?.expected_result ?? "" };
+function draftRegression(testCase?: { scenario?: string; expected_result?: string; gate_class?: string }): DraftRegression {
+  const gateClass = testCase?.gate_class as RegressionGateClass | undefined;
+  return { scenario: testCase?.scenario ?? "", expected_result: testCase?.expected_result ?? "", gate_class: gateClass && regressionGateClasses.includes(gateClass) ? gateClass : "REQUIRED" };
 }
 
 function draftContextRef(ref?: NonNullable<Specification["context_refs"]>[number]): DraftContextRef {
@@ -139,7 +162,7 @@ function ContextReferenceEditor({ contextRef, repository, data, modules, mediaTa
   </div>;
 }
 
-export function SpecificationEditor({ projectID, item, response, onSaved, onError }: Props) {
+export function SpecificationEditor({ projectID, item, response, workflow, onSaved, onError }: Props) {
   const client = useMemo(() => browserAPI(projectID), [projectID]);
   const specification = response?.specification ?? null;
   const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
@@ -159,6 +182,8 @@ export function SpecificationEditor({ projectID, item, response, onSaved, onErro
   const [repositoryContextData, setRepositoryContextData] = useState<RepositoryContextData | null>(null);
   const [repositoryContextLoading, setRepositoryContextLoading] = useState(false);
   const [repositoryContextError, setRepositoryContextError] = useState("");
+  const [repositoryEmpty, setRepositoryEmpty] = useState(false);
+  const [repositoryInitializing, setRepositoryInitializing] = useState(false);
   const [repositoryIndexing, setRepositoryIndexing] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentLoading, setAttachmentLoading] = useState(false);
@@ -272,6 +297,7 @@ export function SpecificationEditor({ projectID, item, response, onSaved, onErro
       repositoryContextCache.set(cacheKey, { data, expiresAt: Date.now() + repositoryCacheTTL });
       setRepositoryContextData(data);
     } catch (cause) {
+      setRepositoryEmpty(isRepositoryEmptyError(cause));
       setRepositoryContextError(apiErrorMessage(cause));
     } finally {
       repositoryContextLoadingRef.current = false;
@@ -290,12 +316,32 @@ export function SpecificationEditor({ projectID, item, response, onSaved, onErro
       repositoryContextLoadingRef.current = false;
       await loadRepositoryContext(true);
     } catch (cause) {
+      setRepositoryEmpty(isRepositoryEmptyError(cause));
       setRepositoryContextError(apiErrorMessage(cause));
     } finally {
       repositoryIndexingRef.current = false;
       setRepositoryIndexing(false);
     }
   }, [client, loadRepositoryContext, projectID, repositoryID]);
+
+  const initializeRepository = useCallback(async () => {
+    if (!repositoryID || repositoryInitializing) return;
+    if (!window.confirm(t("repo.initialize-empty-confirm"))) return;
+    setRepositoryInitializing(true);
+    setRepositoryContextError("");
+    try {
+      await client.initializeRepository(projectID, repositoryID, crypto.randomUUID());
+      repositoryContextCache.delete(`${projectID}:${repositoryID}`);
+      setRepositoryContextData(null);
+      setRepositoryEmpty(false);
+      await loadRepositoryContext(true);
+    } catch (cause) {
+      setRepositoryEmpty(isRepositoryEmptyError(cause));
+      setRepositoryContextError(apiErrorMessage(cause));
+    } finally {
+      setRepositoryInitializing(false);
+    }
+  }, [client, loadRepositoryContext, projectID, repositoryID, repositoryInitializing]);
 
   useEffect(() => {
     if (!repositoryID || repositoryContextData?.repositoryID === repositoryID) return;
@@ -416,7 +462,7 @@ export function SpecificationEditor({ projectID, item, response, onSaved, onErro
         evidence_refs: step.evidence_refs.split("\n").map((reference) => reference.trim()).filter(Boolean),
       }));
       const nextCriteria: AcceptanceCriterion[] = criteria.filter((criterion) => criterion.statement.trim()).map((criterion) => ({ statement: criterion.statement.trim() }));
-      const nextRegressionCases = regressionCases.filter((testCase) => testCase.scenario.trim() || testCase.expected_result.trim()).map((testCase, index) => ({ position: index + 1, scenario: testCase.scenario.trim(), expected_result: testCase.expected_result.trim() }));
+      const nextRegressionCases = regressionCases.filter((testCase) => testCase.scenario.trim() || testCase.expected_result.trim()).map((testCase, index) => ({ position: index + 1, scenario: testCase.scenario.trim(), expected_result: testCase.expected_result.trim(), gate_class: testCase.gate_class }));
       const nextContextRefs = contextRefs.filter((ref) => ref.module.trim() || ref.file.trim() || ref.symbol.trim() || ref.commit.trim() || ref.pull_request.trim() || ref.rationale.trim()).map((ref) => ({ repository_id: repositoryID || undefined, module: ref.module.trim(), file: ref.file.trim(), symbol: ref.symbol.trim(), commit: ref.commit.trim(), pull_request: ref.pull_request.trim(), rationale: ref.rationale.trim() }));
       await client.updateSpecification(item.id, { expected_version: specification.version, summary: summary.trim(), fields: nextFields, reproduction_steps: nextSteps, acceptance_criteria: nextCriteria, regression_test_cases: nextRegressionCases, context_refs: nextContextRefs, media_refs: mediaRefs, repository_id: repositoryID }, projectID);
       const refreshed = await client.getSpecification(item.id, projectID);
@@ -448,27 +494,32 @@ export function SpecificationEditor({ projectID, item, response, onSaved, onErro
     }
   }
 
-  if (!specification) return <div className="app-v2-empty"><strong>{t("spec.no-specification")}</strong><p>{t("spec.reload-before-edit")}</p></div>;
-  const renderSpecificationField = ([key, title, help]: readonly [string, string, string]) => {
+	if (!specification) return <div className="app-v2-empty"><strong>{t("spec.no-specification")}</strong><p>{t("spec.reload-before-edit")}</p></div>;
+	const specificationPhase = specificationWorkflowPhase(item.status, workflow);
+	const canEditSpecification = specificationPhase === "REFINING" || specificationPhase === "REVIEW";
+	const renderSpecificationField = ([key, title, help]: readonly [string, string, string]) => {
     const field = specification.fields?.[key];
     const target = `field:${key}`;
     return <div className="app-v2-editor-field" key={key}><FieldLabel label={t(title)} help={t(help)} status={field ? verificationLabel(field.verification_status) : ""} statusTone={field?.verification_status === "HUMAN_VERIFIED" ? "success" : "warning"} /><textarea aria-label={t(title)} value={fields[key] ?? ""} onChange={(event) => updateField(key, event.target.value)} rows={3} /><FieldMediaPicker target={target} attachments={attachments} selectedIDs={mediaRefs[target] ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, uploadTarget) => void uploadFiles(files, uploadTarget)} onDownload={(attachment) => void downloadAttachment(attachment)} />{field?.value?.trim() && field.verification_status !== "HUMAN_VERIFIED" ? <button className="button button-quiet" type="button" onClick={() => void verify({ kind: "field", field: key }, `field:${key}`)} disabled={Boolean(verifying) || dirty}>{verifying === `field:${key}` ? t("spec.verifying") : t("spec.verify")}</button> : null}</div>;
   };
 
-  return <form className="app-v2-definition-editor" onSubmit={(event) => void save(event)}>
-    <div className="app-v2-editor-heading"><div><h3>{t("spec.editor")}</h3><p>{t("spec.editor-description")}</p></div><span className="app-v2-chip is-info">{t("spec.version", { version: specification.version })}</span></div>
-    {editorError ? <div className="app-v2-error-panel" role="alert"><span>{editorError}</span></div> : null}
-    {editorMessage ? <p className="app-v2-action-status" role="status">{editorMessage}</p> : null}
-    <section className="app-v2-editor-section app-v2-regression-editor"><div className="app-v2-editor-section-heading"><div><h4>{t("spec.regression-cases")}</h4><p>{t("spec.regression-cases-help")}</p></div><button className="button button-secondary" type="button" onClick={() => { setRegressionCases((current) => [...current, draftRegression()]); markDirty(); }}>{t("spec.add-regression-case")}</button></div>{regressionCases.map((testCase, index) => <div className="app-v2-editor-repeater app-v2-regression-row" key={`regression-${index}`}><strong>{t("spec.test-case", { index: index + 1 })}</strong><label className="app-v2-editor-field"><span>{t("spec.test-scenario")}</span><textarea value={testCase.scenario} onChange={(event) => { setRegressionCases((current) => current.map((entry, position) => position === index ? { ...entry, scenario: event.target.value } : entry)); markDirty(); }} rows={2} /></label><label className="app-v2-editor-field"><span>{t("spec.test-expected-result")}</span><textarea value={testCase.expected_result} onChange={(event) => { setRegressionCases((current) => current.map((entry, position) => position === index ? { ...entry, expected_result: event.target.value } : entry)); markDirty(); }} rows={2} /></label><div className="app-v2-repeater-actions">{specification.regression_test_cases?.[index]?.verification_status !== "HUMAN_VERIFIED" ? <button className="button button-quiet" type="button" onClick={() => void verify({ kind: "regression_case", position: index + 1 }, `regression:${index + 1}`)} disabled={Boolean(verifying) || dirty}>{verifying === `regression:${index + 1}` ? t("spec.verifying") : t("spec.verify")}</button> : <span className="app-v2-verified-label">{t("spec.human-verified")}</span>}<button className="button button-quiet is-danger" type="button" onClick={() => { setRegressionCases((current) => current.filter((_, position) => position !== index)); markDirty(); }}>{t("spec.remove")}</button></div></div>)}</section>
+	return <form className="app-v2-definition-editor" onSubmit={(event) => void save(event)}>
+	  <div className="app-v2-editor-heading"><div><h3>{t("spec.editor")}</h3><p>{t("spec.editor-description")}</p></div><span className="app-v2-chip is-info">{t("spec.version", { version: specification.version })}</span></div>
+	  {editorError ? <div className="app-v2-error-panel" role="alert"><span>{editorError}</span></div> : null}
+	  {editorMessage ? <p className="app-v2-action-status" role="status">{editorMessage}</p> : null}
+	  {!canEditSpecification ? <p className="app-v2-inline-note">{t("work.refining-required")}</p> : null}
+	  <fieldset disabled={!canEditSpecification}>
+	  <section className="app-v2-editor-section app-v2-regression-editor"><div className="app-v2-editor-section-heading"><div><h4>{t("spec.regression-cases")}</h4><p>{t("spec.regression-cases-help")}</p></div><button className="button button-secondary" type="button" onClick={() => { setRegressionCases((current) => [...current, draftRegression()]); markDirty(); }}>{t("spec.add-regression-case")}</button></div>{regressionCases.map((testCase, index) => <div className="app-v2-editor-repeater app-v2-regression-row" key={`regression-${index}`}><strong>{t("spec.test-case", { index: index + 1 })}</strong><label className="app-v2-editor-field"><span>{t("spec.test-scenario")}</span><textarea value={testCase.scenario} onChange={(event) => { setRegressionCases((current) => current.map((entry, position) => position === index ? { ...entry, scenario: event.target.value } : entry)); markDirty(); }} rows={2} /></label><label className="app-v2-editor-field"><span>{t("spec.test-expected-result")}</span><textarea value={testCase.expected_result} onChange={(event) => { setRegressionCases((current) => current.map((entry, position) => position === index ? { ...entry, expected_result: event.target.value } : entry)); markDirty(); }} rows={2} /></label><label className="app-v2-editor-field"><span>{t("spec.test-gate-class")}</span><select aria-label={t("spec.test-gate-class")} value={testCase.gate_class} onChange={(event) => { const gateClass = event.target.value as RegressionGateClass; setRegressionCases((current) => current.map((entry, position) => position === index ? { ...entry, gate_class: gateClass } : entry)); markDirty(); }}><option value="REQUIRED">{t("spec.gate-required")}</option><option value="OPTIONAL">{t("spec.gate-optional")}</option><option value="INFORMATIONAL">{t("spec.gate-informational")}</option></select></label><div className="app-v2-repeater-actions">{specification.regression_test_cases?.[index]?.verification_status !== "HUMAN_VERIFIED" ? <button className="button button-quiet" type="button" onClick={() => void verify({ kind: "regression_case", position: index + 1 }, `regression:${index + 1}`)} disabled={Boolean(verifying) || dirty}>{verifying === `regression:${index + 1}` ? t("spec.verifying") : t("spec.verify")}</button> : <span className="app-v2-verified-label">{t("spec.human-verified")}</span>}<button className="button button-quiet is-danger" type="button" onClick={() => { setRegressionCases((current) => current.filter((_, position) => position !== index)); markDirty(); }}>{t("spec.remove")}</button></div></div>)}</section>
     <div className="app-v2-editor-field"><FieldLabel label={item.type === "BUG" ? t("spec.short-problem") : t("spec.summary")} help={t("spec.summary-help")} /><textarea aria-label={item.type === "BUG" ? t("spec.short-problem") : t("spec.summary")} value={summary} onChange={(event) => { setSummary(event.target.value); markDirty(); }} rows={3} placeholder={t("spec.summary-placeholder")} /><FieldMediaPicker target="summary" attachments={attachments} selectedIDs={mediaRefs.summary ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, target) => void uploadFiles(files, target)} onDownload={(attachment) => void downloadAttachment(attachment)} /></div>
     <div className="app-v2-editor-field-groups">{fieldGroups.map((group) => <section className="app-v2-editor-field-group" key={group.title}><div className="app-v2-editor-section-heading"><div><h4>{t(group.title)}</h4><p>{t(group.help)}</p></div></div><div className="app-v2-editor-field-columns"><div>{group.fields.filter((_, index) => index % 2 === 0).map(renderSpecificationField)}</div><div>{group.fields.filter((_, index) => index % 2 === 1).map(renderSpecificationField)}</div></div></section>)}</div>
-    <div className="app-v2-editor-field"><FieldLabel label={t("spec.repository-context")} help={t("spec.repository-context-help")} /><ForgeSelect ariaLabel={t("spec.repository-context")} value={repositoryID} options={repositories.filter((repository) => repository.linked).map((repository) => ({ value: repository.id, label: repository.full_name }))} placeholder={t("spec.no-repository")} searchable onChange={(nextRepositoryID) => { setRepositoryID(nextRepositoryID); setRepositoryContextData(null); setRepositoryContextError(""); markDirty(); }} /><small>{t("spec.repository-help")}</small></div>
+    <div className="app-v2-editor-field"><FieldLabel label={t("spec.repository-context")} help={t("spec.repository-context-help")} /><ForgeSelect ariaLabel={t("spec.repository-context")} value={repositoryID} options={repositories.filter((repository) => repository.linked).map((repository) => ({ value: repository.id, label: repository.full_name }))} placeholder={t("spec.no-repository")} searchable onChange={(nextRepositoryID) => { setRepositoryID(nextRepositoryID); setRepositoryContextData(null); setRepositoryContextError(""); setRepositoryEmpty(false); markDirty(); }} /><small>{t("spec.repository-help")}</small></div>
     <div className="app-v2-context-loader" aria-busy={repositoryContextLoading || repositoryIndexing}><div><strong>{selectedRepository ? selectedRepository.full_name : t("spec.repository-files")}</strong><small>{repositoryData ? `${repositoryFiles.length} ${t("spec.file").toLowerCase()} · ${repositoryData.symbols.length} ${t("spec.symbol").toLowerCase()}${repositoryData.snapshot ? ` · snapshot ${repositoryData.snapshot.commit_sha.slice(0, 8)}` : ` · ${t("spec.repository-index-not-ready")}`}` : repositoryID ? t("spec.repository-context") : `${t("spec.repository-help")} → ${t("nav.repositories")}.`}</small></div><button className="button button-secondary" type="button" onClick={() => void (repositoryData && !repositoryData.snapshot ? indexRepository() : loadRepositoryContext(true))} disabled={!repositoryID || repositoryContextLoading || repositoryIndexing}>{repositoryIndexing ? t("spec.indexing-repository") : repositoryContextLoading ? t("spec.loading-repository") : repositoryData && !repositoryData.snapshot ? t("spec.index-repository") : repositoryData ? t("spec.reload-repository") : t("spec.load-repository")}</button></div>
-    {repositoryContextError ? <p className="app-v2-error-panel" role="alert">{repositoryContextError} {t("spec.affected-help")}</p> : null}
+    {repositoryContextError ? <div className="app-v2-error-panel" role="alert"><span>{repositoryContextError}</span>{repositoryEmpty ? <button className="button button-secondary" type="button" onClick={() => void initializeRepository()} disabled={repositoryInitializing}>{repositoryInitializing ? t("repo.initializing-repository") : t("repo.initialize-empty-repository")}</button> : null}</div> : null}
     <section className="app-v2-editor-section app-v2-attachments-section"><div className="app-v2-editor-section-heading"><div><h4>{t("spec.multimedia-evidence")}</h4><p>{t("spec.multimedia-help")}</p></div><label className="button button-secondary app-v2-attachment-upload">{attachmentBusy ? t("spec.uploading-attachment") : t("spec.upload-attachment")}<input type="file" accept={attachmentAccept} multiple hidden onChange={(event) => void uploadAttachments(event)} disabled={attachmentBusy} /></label></div><p className="app-v2-attachment-limit">{t("spec.attachment-limit")}</p>{attachmentError ? <p className="app-v2-error-panel" role="alert">{attachmentError}</p> : null}{attachmentMessage ? <p className="app-v2-action-status" role="status">{attachmentMessage}</p> : null}{attachmentLoading ? <p className="app-v2-attachment-status" role="status">{t("spec.loading-attachments")}</p> : attachments.length ? <div className="app-v2-attachment-list">{attachments.map((attachment) => <div className="app-v2-attachment-row" key={attachment.id}><button className="button button-quiet app-v2-attachment-name" type="button" onClick={() => void downloadAttachment(attachment)}>{attachment.name}</button><small>{formatAttachmentSize(attachment.size_bytes)}</small><button className="button button-quiet is-danger" type="button" disabled={attachmentBusy} onClick={() => void deleteAttachment(attachment)}>{t("spec.delete")}</button></div>)}</div> : <p className="app-v2-attachment-status">{t("spec.no-attachments")}</p>}</section>
     {item.type === "BUG" ? <section className="app-v2-editor-section"><div className="app-v2-editor-section-heading"><div><h4>{t("spec.reproduction-steps")}</h4><p>{t("spec.reproduction-help")}</p></div><button className="button button-secondary" type="button" onClick={() => { setSteps((current) => [...current, draftStep()]); markDirty(); }}>{t("spec.add-step")}</button></div>{steps.map((step, index) => <div className="app-v2-editor-repeater" key={`step-${index}`}><div className="app-v2-repeater-heading"><strong>{t("spec.step", { index: index + 1 })}</strong>{step.action || step.expected_result || step.observed_result ? <span className={`app-v2-chip is-${uiTone(specification.reproduction_steps?.[index]?.verification_status)}`}>{verificationLabel(specification.reproduction_steps?.[index]?.verification_status)}</span> : null}</div><div className="app-v2-editor-field"><FieldLabel label={t("spec.action")} help={t("spec.action-help")} /><textarea aria-label={t("spec.action")} value={step.action} onChange={(event) => { setSteps((current) => current.map((entry, position) => position === index ? { ...entry, action: event.target.value } : entry)); markDirty(); }} rows={2} /><FieldMediaPicker target={`step:${index + 1}:action`} attachments={attachments} selectedIDs={mediaRefs[`step:${index + 1}:action`] ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, target) => void uploadFiles(files, target)} /></div><div className="app-v2-editor-field"><FieldLabel label={t("spec.expected-result")} help={t("spec.expected-result-help")} /><textarea aria-label={t("spec.expected-result")} value={step.expected_result} onChange={(event) => { setSteps((current) => current.map((entry, position) => position === index ? { ...entry, expected_result: event.target.value } : entry)); markDirty(); }} rows={2} /><FieldMediaPicker target={`step:${index + 1}:expected_result`} attachments={attachments} selectedIDs={mediaRefs[`step:${index + 1}:expected_result`] ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, target) => void uploadFiles(files, target)} /></div><div className="app-v2-editor-field"><FieldLabel label={t("spec.observed-result")} help={t("spec.observed-result-help")} /><textarea aria-label={t("spec.observed-result")} value={step.observed_result} onChange={(event) => { setSteps((current) => current.map((entry, position) => position === index ? { ...entry, observed_result: event.target.value } : entry)); markDirty(); }} rows={2} /><FieldMediaPicker target={`step:${index + 1}:observed_result`} attachments={attachments} selectedIDs={mediaRefs[`step:${index + 1}:observed_result`] ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, target) => void uploadFiles(files, target)} /></div><div className="app-v2-editor-field"><FieldLabel label={t("spec.evidence")} help={t("spec.evidence-help")} /><textarea aria-label={t("spec.evidence")} value={step.evidence_refs} onChange={(event) => { setSteps((current) => current.map((entry, position) => position === index ? { ...entry, evidence_refs: event.target.value } : entry)); markDirty(); }} rows={2} /><FieldMediaPicker target={`step:${index + 1}:evidence`} attachments={attachments} selectedIDs={mediaRefs[`step:${index + 1}:evidence`] ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, target) => void uploadFiles(files, target)} />{attachments.length ? <select className="app-v2-attachment-reference-select" aria-label={t("spec.attach-to-step")} value="" onChange={(event) => addEvidenceReference(index, event.target.value)}><option value="">{t("spec.attach-to-step")}</option>{attachments.map((attachment) => <option value={attachment.id} key={attachment.id}>{attachment.name}</option>)}</select> : null}</div><div className="app-v2-repeater-actions">{specification.reproduction_steps?.[index]?.verification_status !== "HUMAN_VERIFIED" ? <button className="button button-quiet" type="button" onClick={() => void verify({ kind: "reproduction_step", position: index + 1 }, `step:${index + 1}`)} disabled={Boolean(verifying) || dirty}>{verifying === `step:${index + 1}` ? t("spec.verifying") : t("spec.verify")}</button> : <span className="app-v2-verified-label">{t("spec.human-verified")}</span>}<button className="button button-quiet is-danger" type="button" onClick={() => { setSteps((current) => current.filter((_, position) => position !== index)); markDirty(); }}>{t("spec.remove")}</button></div></div>)}</section> : null}
     <section className="app-v2-editor-section"><div className="app-v2-editor-section-heading"><div><h4>{t("spec.acceptance")}</h4><p>{t("spec.acceptance-help")}</p></div><button className="button button-secondary" type="button" onClick={() => { setCriteria((current) => [...current, draftCriterion()]); markDirty(); }}>{t("spec.add-criterion")}</button></div>{criteria.map((criterion, index) => { const target = `acceptance:${index + 1}`; return <div className="app-v2-editor-repeater app-v2-editor-repeater-row" key={`criterion-${index}`}><div className="app-v2-editor-field"><FieldLabel label={t("spec.criterion", { index: index + 1 })} help={t("spec.criterion-help")} /><textarea aria-label={t("spec.criterion", { index: index + 1 })} value={criterion.statement} onChange={(event) => { setCriteria((current) => current.map((entry, position) => position === index ? { statement: event.target.value } : entry)); markDirty(); }} rows={2} /><FieldMediaPicker target={target} attachments={attachments} selectedIDs={mediaRefs[target] ?? []} busy={attachmentBusy} onChange={updateMediaRefs} onUpload={(files, uploadTarget) => void uploadFiles(files, uploadTarget)} /></div>{specification.acceptance_criteria?.[index]?.verification_status !== "HUMAN_VERIFIED" ? <button className="button button-quiet" type="button" onClick={() => void verify({ kind: "acceptance_criterion", position: index + 1 }, `criterion:${index + 1}`)} disabled={Boolean(verifying) || dirty}>{verifying === `criterion:${index + 1}` ? t("spec.verifying") : t("spec.verify")}</button> : <span className="app-v2-verified-label">{t("spec.human-verified")}</span>}<button className="button button-quiet is-danger" type="button" onClick={() => { setCriteria((current) => current.filter((_, position) => position !== index)); markDirty(); }}>{t("spec.remove")}</button></div>; })}</section>
     <section className="app-v2-editor-section"><div className="app-v2-editor-section-heading"><div><h4>{t("spec.affected-component")}</h4><p>{t("spec.affected-help")}</p></div><button className="button button-secondary" type="button" onClick={() => { setContextRefs((current) => [...current, draftContextRef()]); markDirty(); }}>{t("spec.add-component")}</button></div>{contextRefs.map((contextRef, index) => { const target = `context:${index + 1}:rationale`; return <ContextReferenceEditor key={`context-${index}`} contextRef={contextRef} repository={selectedRepository} data={repositoryData} modules={moduleOptions} mediaTarget={target} mediaAttachments={attachments} mediaIDs={mediaRefs[target] ?? []} mediaBusy={attachmentBusy} onMediaChange={updateMediaRefs} onMediaUpload={(files, uploadTarget) => void uploadFiles(files, uploadTarget)} onMediaDownload={(attachment) => void downloadAttachment(attachment)} onChange={(field, value) => updateContextRef(index, field, value)} onRemove={() => { setContextRefs((current) => current.filter((_, position) => position !== index)); markDirty(); }} />; })}</section>
-    <div className="app-v2-editor-actions"><span>{dirty ? t("spec.unsaved") : t("spec.saved")}</span><button className="button button-primary" type="submit" disabled={saving || attachmentBusy || !dirty}>{saving ? t("spec.saving") : t("spec.save")}</button></div>
-  </form>;
+	  <div className="app-v2-editor-actions"><span>{dirty ? t("spec.unsaved") : t("spec.saved")}</span><button className="button button-primary" type="submit" disabled={saving || attachmentBusy || !dirty}>{saving ? t("spec.saving") : t("spec.save")}</button></div>
+	  </fieldset>
+	</form>;
 }

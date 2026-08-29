@@ -178,7 +178,11 @@ func (s *Service) SetValue(ctx context.Context, actor identity.Actor, projectID,
 
 func (s *Service) record(ctx context.Context, actor identity.Actor, action, resourceID string, before, after any) error {
 	if s.recorder.Audit != nil {
-		if err := s.recorder.Audit.Record(ctx, audit.Record{ActorType: actor.Type, ActorID: actor.ID, OrganizationID: actor.OrganizationID, Source: actor.Source, Action: action, ResourceType: "custom_field", ResourceID: resourceID, Before: before, After: after, CreatedAt: s.now().UTC()}); err != nil {
+		id, err := ids.New()
+		if err != nil {
+			return err
+		}
+		if err := s.recorder.Audit.Record(ctx, audit.Record{ID: id, ActorType: actor.Type, ActorID: actor.ID, OrganizationID: actor.OrganizationID, Source: actor.Source, Action: action, ResourceType: "custom_field", ResourceID: resourceID, Before: before, After: after, CreatedAt: s.now().UTC()}); err != nil {
 			return err
 		}
 	}

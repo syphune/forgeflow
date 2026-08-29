@@ -6,6 +6,7 @@ import (
 
 	"github.com/forgeflow/forgeflow/backend/internal/audit"
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
+	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
 )
 
@@ -32,6 +33,59 @@ func TestProjectAndWorkspaceMutationsRecordAuditAndOutbox(t *testing.T) {
 	}
 	if got := len(outboxWriter.Events()); got != 3 {
 		t.Fatalf("outbox events = %d, want 3", got)
+	}
+}
+
+func TestProjectBoardSettingsRoundTripAndValidation(t *testing.T) {
+	service := NewService(NewMemoryStore())
+	actor := identity.Actor{ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{"*": true}}
+	workspace, err := service.CreateWorkspace(context.Background(), actor, "MAIN", "Main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := service.CreateProject(context.Background(), actor, workspace.ID, "APP", "Application")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := service.GetProjectBoardSettings(context.Background(), actor, project.ID)
+	if err != nil || settings.DoneVisibilityDays != 0 {
+		t.Fatalf("default board settings = %#v, err = %v", settings, err)
+	}
+	settings, err = service.UpdateProjectBoardSettings(context.Background(), actor, project.ID, 14)
+	if err != nil || settings.DoneVisibilityDays != 14 {
+		t.Fatalf("updated board settings = %#v, err = %v", settings, err)
+	}
+	settings, err = service.GetProjectBoardSettings(context.Background(), actor, project.ID)
+	if err != nil || settings.DoneVisibilityDays != 14 {
+		t.Fatalf("reloaded board settings = %#v, err = %v", settings, err)
+	}
+	if _, err := service.UpdateProjectBoardSettings(context.Background(), actor, project.ID, 1); apperr.From(err).Code != apperr.CodeInvalidArgument {
+		t.Fatalf("invalid board settings error = %v", err)
+	}
+}
+
+func TestCreateProjectRequiresProjectManage(t *testing.T) {
+	service := NewService(NewMemoryStore())
+	actor := identity.Actor{ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{identity.CapabilityProjectRead: true}}
+
+	_, err := service.CreateProject(context.Background(), actor, "workspace-1", "APP", "Application")
+	if appErr := apperr.From(err); appErr.Code != apperr.CodeForbidden || appErr.Status != 403 {
+		t.Fatalf("create project error = %v, want forbidden project.manage", err)
+	}
+}
+
+func TestCreateOrganizationAllowsAuthenticatedActorWithoutOrganization(t *testing.T) {
+	store := NewMemoryStore()
+	service := NewService(store)
+	actor := identity.Actor{ID: "user-1", Source: "session"}
+
+	organization, err := service.CreateOrganization(context.Background(), actor, "acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	organizations, err := service.Organizations(context.Background(), actor)
+	if err != nil || len(organizations) != 1 || organizations[0].ID != organization.ID {
+		t.Fatalf("organizations = %#v, err = %v", organizations, err)
 	}
 }
 

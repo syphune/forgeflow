@@ -140,6 +140,126 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/work-items/{id}/branch-plan": {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        get: operations["getWorkItemBranchPlan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/work-items/{id}/branch-plan/preview": {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["previewWorkItemBranchPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/work-items/{id}/branch-plan/prepare": {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["prepareWorkItemBranchPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/work-items/{id}/branch-plan/pull-request": {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["createWorkItemBranchPullRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/work-items/{id}/branch-plan/sync": {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["syncWorkItemBranchPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/work-items/{id}/branch-plan/operations": {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        get: operations["listWorkItemBranchOperations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/work-items/{id}/assignments": {
         parameters: {
             query?: never;
@@ -619,7 +739,7 @@ export interface paths {
         };
         get: operations["listOrganizations"];
         put?: never;
-        post?: never;
+        post: operations["createOrganization"];
         delete?: never;
         options?: never;
         head?: never;
@@ -798,6 +918,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/board-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get: operations["getProjectBoardSettings"];
+        put: operations["updateProjectBoardSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/projects/{id}/members": {
         parameters: {
             query?: never;
@@ -872,6 +1010,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/branch-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        get: operations["getProjectBranchPolicy"];
+        put: operations["saveProjectBranchPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/workflows/current": {
         parameters: {
             query?: never;
@@ -884,6 +1040,23 @@ export interface paths {
         /** Replace the selected project's workflow definition */
         put: operations["saveCurrentWorkflow"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workflows/current/templates/release-gated": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install the optional release-gated workflow for the selected project */
+        post: operations["installReleaseGatedWorkflow"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1331,6 +1504,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/delivery-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        get: operations["getProjectDeliveryPolicy"];
+        put: operations["updateProjectDeliveryPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/projects/{id}/environments": {
         parameters: {
             query?: never;
@@ -1391,6 +1582,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["approveDeployment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deployments/{id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["verifyDeployment"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1498,6 +1705,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/integrations/github/user/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Start the GitHub code authorization flow for the current user */
+        get: operations["startGitHubUserAuthorization"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/github/user/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["completeGitHubUserAuthorization"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/integrations/github/repositories": {
         parameters: {
             query?: never;
@@ -1586,6 +1826,26 @@ export interface paths {
         get: operations["getRepositoryContext"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/repositories/{repository_id}/initialize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create the first main commit for an empty linked repository */
+        post: operations["initializeRepository"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2009,6 +2269,11 @@ export interface components {
             assignee_id?: string | null;
             /** @enum {string} */
             priority?: "LOWEST" | "LOW" | "MEDIUM" | "HIGH" | "HIGHEST";
+            /**
+             * @default NORMAL
+             * @enum {string}
+             */
+            risk_level: "LOW" | "NORMAL" | "HIGH" | "CRITICAL";
             /** Format: date-time */
             due_at?: string | null;
             estimate_points?: number | null;
@@ -2024,6 +2289,8 @@ export interface components {
             repository_id?: string | null;
             /** @enum {string} */
             priority?: "LOWEST" | "LOW" | "MEDIUM" | "HIGH" | "HIGHEST";
+            /** @enum {string} */
+            risk_level?: "LOW" | "NORMAL" | "HIGH" | "CRITICAL";
             /** Format: date-time */
             due_at?: string | null;
             estimate_points?: number | null;
@@ -2093,6 +2360,8 @@ export interface components {
             parent_id?: string | null;
             /** @enum {string} */
             priority?: "LOWEST" | "LOW" | "MEDIUM" | "HIGH" | "HIGHEST";
+            /** @enum {string} */
+            risk_level: "LOW" | "NORMAL" | "HIGH" | "CRITICAL";
             /** Format: uuid */
             assignee_id?: string | null;
             /** Format: uuid */
@@ -2109,6 +2378,8 @@ export interface components {
             /** Format: date-time */
             archived_at?: string | null;
             archived_by?: string | null;
+            /** Format: date-time */
+            completed_at?: string | null;
         };
         WorkflowStatus: {
             key: string;
@@ -2123,7 +2394,7 @@ export interface components {
             from_status: string;
             to_status: string;
             display_name: string;
-            required_rules?: ("require_specification_ready" | "require_human_verification" | "require_assignee" | "require_repository" | "require_pull_request" | "require_ci_success" | "require_permission")[];
+            required_rules?: ("require_specification_ready" | "require_human_verification" | "require_assignee" | "require_repository" | "require_pull_request" | "require_ci_success" | "require_permission" | "require_branch_plan" | "require_branch_sync" | "require_current_ci_checks" | "require_pull_request_review" | "require_qa_passing" | "require_release_approval" | "require_deployment_success" | "require_production_verification" | "require_rollback_plan")[];
             required_permissions?: string[];
         };
         SaveWorkflowRequest: {
@@ -2137,6 +2408,144 @@ export interface components {
             name: string;
             statuses: components["schemas"]["WorkflowStatus"][];
             transitions: components["schemas"]["WorkflowTransition"][];
+        };
+        BranchRule: {
+            /** @enum {string} */
+            branch_type: "feature" | "fix" | "refactor" | "chore" | "hotfix" | "release";
+            /** @enum {string} */
+            base_role: "development" | "production" | "release";
+            /** @enum {string} */
+            target_role: "development" | "production" | "release";
+            sync_roles?: ("development" | "production" | "release")[];
+            /** @enum {string} */
+            working_mode: "ephemeral" | "managed";
+            allow_release_base?: boolean;
+            create_pull_request: boolean;
+            require_sync: boolean;
+        };
+        BranchPolicyInput: {
+            development_branch: string;
+            production_branch: string;
+            release_prefix: string;
+            work_branch_template: string;
+            rules: components["schemas"]["BranchRule"][];
+            expected_version?: number;
+        };
+        BranchPolicy: components["schemas"]["BranchPolicyInput"] & {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            organization_id: string;
+            /** Format: uuid */
+            project_id: string;
+            version: number;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        BranchPlanPreviewRequest: {
+            /** @enum {string} */
+            branch_type?: "feature" | "fix" | "refactor" | "chore" | "hotfix" | "release";
+            release_branch?: string;
+        };
+        BranchPlanPreview: {
+            /** Format: uuid */
+            id?: string;
+            /** Format: uuid */
+            organization_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            work_item_id: string;
+            /** Format: uuid */
+            repository_id: string;
+            work_item_key?: string;
+            branch_type: string;
+            release_branch?: string | null;
+            base_branch: string;
+            target_branch: string;
+            working_branch: string;
+            sync_branches?: string[];
+            create_pull_request: boolean;
+            require_sync: boolean;
+            base_sha: string;
+            policy_version?: number;
+            work_item_version?: number;
+            /** @enum {string} */
+            state: "PENDING" | "READY" | "FAILED";
+            error?: string;
+            created_by?: string;
+            version?: number;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        BranchPlan: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            organization_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            work_item_id: string;
+            /** Format: uuid */
+            repository_id: string;
+            work_item_key?: string;
+            branch_type: string;
+            release_branch?: string | null;
+            base_branch: string;
+            target_branch: string;
+            working_branch: string;
+            sync_branches?: string[];
+            create_pull_request: boolean;
+            require_sync: boolean;
+            base_sha: string;
+            policy_version?: number;
+            work_item_version?: number;
+            /** @enum {string} */
+            state: "PENDING" | "READY" | "FAILED";
+            error?: string;
+            created_by?: string;
+            version: number;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        BranchOperation: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            plan_id: string;
+            /** Format: uuid */
+            organization_id?: string;
+            /** Format: uuid */
+            project_id?: string;
+            /** Format: uuid */
+            repository_id?: string;
+            /** @enum {string} */
+            kind: "BRANCH_CREATE" | "PULL_REQUEST" | "SYNC_PULL_REQUEST";
+            /** @enum {string} */
+            state: "PENDING" | "COMPLETED" | "MERGED" | "FAILED";
+            idempotency_key: string;
+            source_branch?: string;
+            target_branch?: string;
+            /** Format: int64 */
+            pull_request_number?: number;
+            /** Format: uri */
+            pull_request_url?: string;
+            error?: string;
+            version: number;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        BranchOperationList: {
+            items: components["schemas"]["BranchOperation"][];
         };
         AuditRecord: {
             /** Format: uuid */
@@ -2183,6 +2592,14 @@ export interface components {
             commits: components["schemas"]["RepositoryCommit"][];
             pull_requests: components["schemas"]["RepositoryPullRequest"][];
             ci_runs: components["schemas"]["RepositoryCIRun"][];
+        };
+        RepositoryInitialization: {
+            /** Format: uuid */
+            repository_id: string;
+            full_name: string;
+            branch: string;
+            path: string;
+            commit_sha: string;
         };
         RepositoryBranch: {
             /** Format: uuid */
@@ -2260,6 +2677,11 @@ export interface components {
             body?: string;
             /** Format: uri */
             url?: string;
+            author_login?: string;
+            changed_paths?: string[];
+            approved_by_logins?: string[];
+            changes_requested?: boolean;
+            merged?: boolean;
             /** Format: date-time */
             updated_at?: string;
         };
@@ -2275,6 +2697,7 @@ export interface components {
             /** Format: uuid */
             repository_id?: string;
             external_id?: string;
+            check_name?: string;
             status?: string;
             conclusion?: string;
             sha?: string;
@@ -2473,6 +2896,10 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        CreateOrganizationRequest: {
+            slug: string;
+            display_name: string;
+        };
         Workspace: {
             /** Format: uuid */
             id: string;
@@ -2492,8 +2919,39 @@ export interface components {
             workspace_id: string;
             key: string;
             display_name: string;
+            /**
+             * @description 0 keeps completed work visible indefinitely
+             * @enum {integer}
+             */
+            done_visibility_days?: 0 | 7 | 14 | 30 | 60;
             /** Format: date-time */
             created_at: string;
+        };
+        ProjectBoardSettings: {
+            /** Format: uuid */
+            project_id: string;
+            /** @enum {integer} */
+            done_visibility_days: 0 | 7 | 14 | 30 | 60;
+        };
+        ProjectBoardSettingsRequest: {
+            /** @enum {integer} */
+            done_visibility_days: 0 | 7 | 14 | 30 | 60;
+        };
+        BoardColumn: {
+            status: string;
+            name: string;
+            position: number;
+            /** Format: int64 */
+            ordering_version: number;
+            items: components["schemas"]["WorkItemResponse"][];
+        };
+        BoardResponse: {
+            /** Format: uuid */
+            project_id: string;
+            columns: components["schemas"]["BoardColumn"][];
+            truncated: boolean;
+            /** @enum {integer} */
+            done_visibility_days: 0 | 7 | 14 | 30 | 60;
         };
         MemberRoleRequest: {
             /** Format: uuid */
@@ -2610,6 +3068,11 @@ export interface components {
             position?: number;
             scenario?: string;
             expected_result?: string;
+            /**
+             * @default REQUIRED
+             * @enum {string}
+             */
+            gate_class: "REQUIRED" | "OPTIONAL" | "INFORMATIONAL";
             provenance?: string;
             verification_status?: string;
             /** Format: uuid */
@@ -2698,7 +3161,9 @@ export interface components {
             id: string;
             type: string;
             /** Format: uuid */
-            organization_id: string;
+            organization_id: string | null;
+            login?: string;
+            display_name?: string;
             source?: string;
         };
         AuthorizationContext: {
@@ -3027,6 +3492,44 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        PathReviewRule: {
+            pattern: string;
+            min_approvals: number;
+            required_roles: string[];
+        };
+        ReviewPolicy: {
+            min_approvals: number;
+            /** @default true */
+            forbid_self_approval: boolean;
+            required_roles: string[];
+            path_rules: components["schemas"]["PathReviewRule"][];
+        };
+        RiskRule: {
+            min_approvals: number;
+            required_roles: string[];
+            require_qa: boolean;
+            require_rollback_plan: boolean;
+            require_production_verification: boolean;
+        };
+        DeliveryPolicy: {
+            /** Format: uuid */
+            id?: string;
+            /** Format: uuid */
+            organization_id?: string;
+            /** Format: uuid */
+            project_id?: string;
+            /** Format: int64 */
+            version: number;
+            /** @enum {string} */
+            release_mode: "standard" | "release_gated";
+            /** Format: uuid */
+            production_environment_id?: string;
+            required_checks?: string[];
+            review: components["schemas"]["ReviewPolicy"];
+            risk_rules: {
+                [key: string]: components["schemas"]["RiskRule"];
+            };
+        };
         DeploymentRequest: {
             /** Format: uuid */
             id: string;
@@ -3037,10 +3540,12 @@ export interface components {
             /** Format: uuid */
             environment_id: string;
             /** Format: uuid */
+            work_item_id?: string;
+            /** Format: uuid */
             autonomous_run_id?: string;
             commit_sha: string;
             /** @enum {string} */
-            status: "PENDING_APPROVAL" | "DISPATCHED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+            status: "PENDING_APPROVAL" | "DISPATCHED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "VERIFIED";
             external_id?: string;
             /** Format: uri */
             url?: string;
@@ -3060,6 +3565,8 @@ export interface components {
             project_id: string;
             /** Format: uuid */
             environment_id: string;
+            /** Format: uuid */
+            work_item_id?: string;
             /** Format: uuid */
             autonomous_run_id?: string;
             commit_sha: string;
@@ -3228,6 +3735,8 @@ export interface operations {
                 cursor?: string;
                 /** @description Include archived work items in the result */
                 include_archived?: boolean;
+                /** @description Exclude work items in terminal workflow statuses unless a status filter is provided */
+                exclude_terminal?: boolean;
                 /** @description Sort by recent activity or persisted backlog rank */
                 sort?: "updated" | "backlog";
             };
@@ -3504,6 +4013,164 @@ export interface operations {
             };
             409: components["responses"]["ConflictError"];
             422: components["responses"]["ValidationError"];
+        };
+    };
+    getWorkItemBranchPlan: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Immutable branch plan snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchPlan"];
+                };
+            };
+            404: components["responses"]["NotFoundError"];
+        };
+    };
+    previewWorkItemBranchPlan: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["BranchPlanPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Branch plan preview */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchPlanPreview"];
+                };
+            };
+            422: components["responses"]["ValidationError"];
+        };
+    };
+    prepareWorkItemBranchPlan: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["BranchPlanPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Prepared branch plan */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchPlan"];
+                };
+            };
+            409: components["responses"]["ConflictError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
+    createWorkItemBranchPullRequest: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Idempotent pull request operation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchOperation"];
+                };
+            };
+            409: components["responses"]["ConflictError"];
+        };
+    };
+    syncWorkItemBranchPlan: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Sync pull request operations */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchOperationList"];
+                };
+            };
+            409: components["responses"]["ConflictError"];
+        };
+    };
+    listWorkItemBranchOperations: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["WorkItemID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Branch operations for the immutable plan */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchOperationList"];
+                };
+            };
         };
     };
     assignWorkItem: {
@@ -4360,6 +5027,30 @@ export interface operations {
             };
         };
     };
+    createOrganization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOrganizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Organization created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Organization"];
+                };
+            };
+        };
+    };
     getCurrentOrganization: {
         parameters: {
             query?: never;
@@ -4674,6 +5365,55 @@ export interface operations {
             };
         };
     };
+    getProjectBoardSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Jira-style board visibility settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectBoardSettings"];
+                };
+            };
+        };
+    };
+    updateProjectBoardSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectBoardSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated board visibility settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectBoardSettings"];
+                };
+            };
+            422: components["responses"]["ValidationError"];
+        };
+    };
     listProjectMembers: {
         parameters: {
             query?: never;
@@ -4844,6 +5584,56 @@ export interface operations {
             };
         };
     };
+    getProjectBranchPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project branch policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchPolicy"];
+                };
+            };
+        };
+    };
+    saveProjectBranchPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BranchPolicyInput"];
+            };
+        };
+        responses: {
+            /** @description Saved project branch policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchPolicy"];
+                };
+            };
+            409: components["responses"]["ConflictError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
     getCurrentWorkflow: {
         parameters: {
             query?: never;
@@ -4882,6 +5672,31 @@ export interface operations {
         };
         responses: {
             /** @description Workflow saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+            409: components["responses"]["ConflictError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
+    installReleaseGatedWorkflow: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Release-gated workflow installed */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4951,7 +5766,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["BoardResponse"];
+                };
             };
         };
     };
@@ -5692,6 +6509,57 @@ export interface operations {
             };
         };
     };
+    getProjectDeliveryPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project delivery and release gates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliveryPolicy"];
+                };
+            };
+        };
+    };
+    updateProjectDeliveryPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeliveryPolicy"];
+            };
+        };
+        responses: {
+            /** @description Project delivery and release gates updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliveryPolicy"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+            409: components["responses"]["ConflictError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
     listProjectEnvironments: {
         parameters: {
             query?: never;
@@ -5814,6 +6682,32 @@ export interface operations {
                     "application/json": components["schemas"]["DeploymentRequest"];
                 };
             };
+        };
+    };
+    verifyDeployment: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: components["parameters"]["DeploymentID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Production deployment verified */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeploymentRequest"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+            409: components["responses"]["ConflictError"];
         };
     };
     updateDeploymentStatus: {
@@ -5955,6 +6849,51 @@ export interface operations {
             422: components["responses"]["ValidationError"];
         };
     };
+    startGitHubUserAuthorization: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to GitHub OAuth */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["ValidationError"];
+        };
+    };
+    completeGitHubUserAuthorization: {
+        parameters: {
+            query: {
+                state: string;
+                code?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect back to Forgeflow */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["UnauthorizedError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
     listGitHubRepositories: {
         parameters: {
             query: {
@@ -6089,6 +7028,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RepositoryContext"];
+                };
+            };
+        };
+    };
+    initializeRepository: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Repository initialized */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepositoryInitialization"];
                 };
             };
         };

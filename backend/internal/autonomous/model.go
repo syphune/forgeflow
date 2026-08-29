@@ -157,8 +157,8 @@ type StartInput struct {
 }
 
 type RetryInput struct {
-	Feedback          string
-	TestCasePositions []int
+	Feedback          string `json:"feedback"`
+	TestCasePositions []int  `json:"test_case_positions"`
 }
 
 type FeedbackInput struct {
@@ -191,6 +191,8 @@ type StateUpdate struct {
 	CurrentAgentRunID   string
 	PullRequestID       string
 	CommitSHA           string
+	BaseSHA             string
+	Branch              string
 	Attempt             int
 	UnresolvedPositions []int
 	LastError           string

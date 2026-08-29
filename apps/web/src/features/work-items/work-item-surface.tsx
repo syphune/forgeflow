@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentRun, AuthorizationContext, Comment, CreateAgentRunRequest, Member, SpecificationResponse, WorkItem, WorkflowResponse } from "@forgeflow/api-client";
+import { APIError } from "@forgeflow/api-client";
+import type { AgentRun, AuthorizationContext, BranchOperation, BranchPlan, BranchPlanPreview, BranchPlanPreviewRequest, Comment, CreateAgentRunRequest, Member, SpecificationResponse, WorkItem, WorkflowResponse } from "@forgeflow/api-client";
 import { readinessLabel, statusLabel, translate as t } from "@forgeflow/ui";
 import { apiErrorMessage, browserAPI } from "../app/api";
 import { ForgeSelect } from "../app/forge-select";
-import { SpecificationEditor } from "./specification-editor";
+import { SpecificationEditor, specificationWorkflowPhase } from "./specification-editor";
 import { AgentRunsReviewPanel } from "./agent-runs-review";
 import { AutonomousWorkflowPanel } from "./autonomous-workflow";
 import { rolesForCapabilities, transitionPermissions } from "./workflow-responsibilities";
@@ -26,6 +27,7 @@ const permissionKeys: Record<string, string> = {
   "specification.verify": "work.permission-verify",
   "agent.execute": "work.permission-agent-execute",
   "agent.approve": "work.permission-agent-approve",
+  "branch.manage": "work.permission-branch-manage",
 };
 
 const ruleKeys: Record<string, string> = {
@@ -36,6 +38,8 @@ const ruleKeys: Record<string, string> = {
   require_pull_request: "work.rule-pull-request",
   require_ci_success: "work.rule-ci-success",
   require_permission: "work.rule-permission",
+  require_branch_plan: "work.rule-branch-plan",
+  require_branch_sync: "work.rule-branch-sync",
 };
 const activeAgentRunStatuses = ["QUEUED", "PREPARING", "PLANNING", "INVESTIGATING", "IMPLEMENTING", "TESTING"];
 
@@ -141,6 +145,79 @@ function LegacyAgentRunsPanel({ projectID, basePath, item, authorization, specif
   return <section className="app-v2-detail-stack" aria-labelledby="agent-runs-heading"><div className="app-v2-surface-card"><div className="app-v2-card-heading"><div><h3 id="agent-runs-heading">{t("work.agent-runs")}</h3><p>{t("work.agent-runs-description")}</p></div><button className="button button-primary" type="button" onClick={() => setFormOpen((current) => !current)} disabled={!canExecute || !item.repository_id}>{formOpen ? t("backlog.close") : t("work.new-agent-run")}</button></div>{!item.repository_id ? <div className="app-v2-inline-note">{t("work.agent-repository-required")} <Link href={`${basePath}/repositories`}>{t("nav.repositories")}</Link></div> : null}{!canExecute ? <div className="app-v2-inline-note">{t("work.agent-execute-read-only")}</div> : null}{error ? <div className="app-v2-error-panel" role="alert"><strong>{t("work.agent-runs-error")}</strong><span>{error}</span><button type="button" onClick={() => void load()}>{t("app.retry")}</button></div> : null}{message ? <p className="app-v2-action-status" role="status">{message}</p> : null}{formOpen ? <form className="app-v2-run-form" onSubmit={createRun}><label className="app-v2-dialog-field"><span>{t("work.agent-provider")}</span><input value={provider} onChange={(event) => setProvider(event.target.value)} required /></label><label className="app-v2-dialog-field"><span>{t("work.agent-name")}</span><input value={agentName} onChange={(event) => setAgentName(event.target.value)} required /></label><label className="app-v2-dialog-field app-v2-run-prompt"><span>{t("work.agent-prompt")}</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={5} required /></label><div className="app-v2-editor-actions"><button className="button button-primary" type="submit" disabled={busyID === "create" || !prompt.trim()}>{busyID === "create" ? t("work.creating-run") : t("work.create-run")}</button><button className="button button-secondary" type="button" onClick={() => setFormOpen(false)}>{t("backlog.cancel")}</button></div></form> : null}{loading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /><p>{t("work.agent-runs-loading")}</p></div> : !runs.length ? <div className="app-v2-empty"><strong>{t("work.no-agent-runs")}</strong><p>{t("work.no-agent-runs-description")}</p></div> : <div className="app-v2-run-list">{runs.map((run) => { const active = ["QUEUED", "PREPARING", "PLANNING", "INVESTIGATING", "IMPLEMENTING", "TESTING"].includes(run.status); return <article className="app-v2-run-card" key={run.id}><div className="app-v2-run-card-heading"><div><span className="app-v2-key">{run.agent_name}</span><h4>{run.agent_provider}</h4></div><span className={`app-v2-run-status is-${run.status.toLowerCase()}`}>{statusLabel(run.status)}</span></div><p>{run.execution_inputs?.prompt || t("work.no-agent-prompt")}</p><div className="app-v2-run-meta"><span>{run.approved ? t("work.run-approved") : t("work.run-awaiting-approval")}</span><span>{run.created_at ? new Intl.DateTimeFormat(typeof document !== "undefined" && document.documentElement.lang === "en" ? "en-US" : "vi-VN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(run.created_at)) : ""}</span></div><div className="app-v2-run-actions">{!run.approved ? <button className="button button-secondary" type="button" onClick={() => void runAction(run, "approve")} disabled={!canApprove || Boolean(busyID)}>{busyID === run.id ? t("work.processing") : t("work.approve-run")}</button> : null}{run.approved && ["QUEUED", "INTERRUPTED"].includes(run.status) ? <button className="button button-primary" type="button" onClick={() => void runAction(run, run.status === "INTERRUPTED" ? "resume" : "start")} disabled={!canExecute || Boolean(busyID)}>{run.status === "INTERRUPTED" ? t("work.resume-run") : t("work.start-run")}</button> : null}{active ? <button className="button button-quiet is-danger" type="button" onClick={() => void runAction(run, "cancel")} disabled={!canExecute || Boolean(busyID)}>{t("work.cancel-run")}</button> : null}</div></article>; })}</div>}</div></section>;
 }
 
+type BranchPlanView = BranchPlan | BranchPlanPreview;
+
+function BranchPlanPanel({ projectID, item, authorization }: { projectID: string; item: WorkItem; authorization: AuthorizationContext | null }) {
+  const client = useMemo(() => browserAPI(projectID), [projectID]);
+  const [plan, setPlan] = useState<BranchPlanView | null>(null);
+  const [operations, setOperations] = useState<BranchOperation[]>([]);
+  const [branchType, setBranchType] = useState<NonNullable<BranchPlanPreviewRequest["branch_type"]>>(item.type === "BUG" ? "fix" : "feature");
+  const [releaseBranch, setReleaseBranch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const canPreview = authorization?.capabilities.includes("project.read") ?? false;
+  const canManage = authorization?.capabilities.includes("branch.manage") ?? false;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const loaded = await client.getWorkItemBranchPlan(item.id, projectID);
+      setPlan(loaded);
+      const result = await client.listWorkItemBranchOperations(item.id, projectID);
+      setOperations(result.items ?? []);
+    } catch (cause) {
+      if (cause instanceof APIError && cause.status === 404) {
+        setPlan(null);
+        setOperations([]);
+      } else {
+        setError(apiErrorMessage(cause));
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [client, item.id, projectID]);
+
+  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
+
+  const input: BranchPlanPreviewRequest = { branch_type: branchType, release_branch: releaseBranch.trim() || undefined };
+
+  async function run(action: "preview" | "prepare" | "pull-request" | "sync") {
+    if (busy || (action === "preview" ? !canPreview : !canManage)) return;
+    setBusy(action);
+    setError("");
+    setMessage("");
+    try {
+      if (action === "preview") {
+        setPlan(await client.previewWorkItemBranchPlan(item.id, input, projectID));
+        setMessage(t("work.branch-plan-previewed"));
+      } else if (action === "prepare") {
+        setPlan(await client.prepareWorkItemBranchPlan(item.id, input, projectID));
+        const result = await client.listWorkItemBranchOperations(item.id, projectID);
+        setOperations(result.items ?? []);
+        setMessage(t("work.branch-plan-prepared"));
+      } else if (action === "pull-request") {
+        await client.createWorkItemBranchPullRequest(item.id, projectID);
+        const result = await client.listWorkItemBranchOperations(item.id, projectID);
+        setOperations(result.items ?? []);
+        setMessage(t("work.branch-plan-pr-created"));
+      } else {
+        const result = await client.syncWorkItemBranchPlan(item.id, projectID);
+        setOperations(result.items ?? []);
+        setMessage(t("work.branch-plan-sync-started"));
+      }
+    } catch (cause) {
+      setError(apiErrorMessage(cause));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return <section className="app-v2-detail-stack" aria-labelledby="branch-plan-heading"><div className="app-v2-surface-card"><div className="app-v2-card-heading"><div><h3 id="branch-plan-heading">{t("work.branch-plan")}</h3><p>{t("work.branch-plan-description")}</p></div>{plan ? <span className={`app-v2-chip is-${plan.state === "READY" ? "success" : plan.state === "FAILED" ? "danger" : "warning"}`}>{plan.state}</span> : null}</div>{error ? <div className="app-v2-error-panel" role="alert"><strong>{t("work.branch-plan-error")}</strong><span>{error}</span><button type="button" onClick={() => void load()}>{t("app.retry")}</button></div> : null}{message ? <p className="app-v2-action-status" role="status">{message}</p> : null}{!canManage ? <div className="app-v2-inline-note">{t("work.branch-plan-read-only")}</div> : null}{loading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /></div> : <><div className="app-v2-form-grid"><label className="app-v2-dialog-field"><span>{t("work.branch-type")}</span><select value={branchType} onChange={(event) => setBranchType(event.target.value as typeof branchType)} disabled={!canManage || Boolean(plan?.id)}><option value="feature">feature</option><option value="fix">fix</option><option value="refactor">refactor</option><option value="chore">chore</option><option value="hotfix">hotfix</option><option value="release">release</option></select></label><label className="app-v2-dialog-field"><span>{t("work.release-branch")}</span><input value={releaseBranch} onChange={(event) => setReleaseBranch(event.target.value)} placeholder="release/1.5" maxLength={255} disabled={!canManage || Boolean(plan?.id)} /></label></div>{plan ? <div className="app-v2-branch-plan-summary"><div><span>{t("work.base-branch")}</span><strong>{plan.base_branch}</strong></div><div><span>{t("work.target-branch")}</span><strong>{plan.target_branch}</strong></div><div><span>{t("work.working-branch")}</span><strong>{plan.working_branch}</strong></div><div><span>{t("work.base-sha")}</span><strong>{plan.base_sha}</strong></div><div><span>{t("work.sync-branches")}</span><strong>{plan.sync_branches?.join(", ") || t("work.none")}</strong></div></div> : <div className="app-v2-inline-note">{t("work.branch-plan-not-prepared")}</div>}<div className="app-v2-editor-actions"><button className="button button-secondary" type="button" onClick={() => void run("preview")} disabled={!canPreview || Boolean(busy)}>{busy === "preview" ? t("work.processing") : t("work.preview-branch-plan")}</button><button className="button button-primary" type="button" onClick={() => void run("prepare")} disabled={!canManage || Boolean(busy) || Boolean(plan?.id && plan.state !== "FAILED")}>{busy === "prepare" ? t("work.processing") : t("work.prepare-branch-plan")}</button>{plan?.state === "READY" && plan.create_pull_request ? <button className="button button-secondary" type="button" onClick={() => void run("pull-request")} disabled={!canManage || Boolean(busy)}>{busy === "pull-request" ? t("work.processing") : t("work.create-branch-pr")}</button> : null}{plan?.state === "READY" && plan.sync_branches?.length ? <button className="button button-secondary" type="button" onClick={() => void run("sync")} disabled={!canManage || Boolean(busy)}>{busy === "sync" ? t("work.processing") : t("work.start-sync")}</button> : null}</div>{operations.length ? <div className="app-v2-rule-list">{operations.map((operation) => <div className="app-v2-rule-row" key={operation.id}><div><strong>{operation.kind}</strong><small>{operation.source_branch || ""} → {operation.target_branch || ""}</small></div><div><span className={`app-v2-chip is-${operation.state === "MERGED" ? "success" : operation.state === "FAILED" ? "danger" : "warning"}`}>{operation.state}</span>{operation.pull_request_url ? <a href={operation.pull_request_url} target="_blank" rel="noreferrer">PR #{operation.pull_request_number}</a> : null}</div></div>)}</div> : null}</>}</div></section>;
+}
+
 export function WorkItemSurface({ projectID, itemID, basePath, modal = false }: Props) {
   const client = useMemo(() => browserAPI(projectID), [projectID]);
   const router = useRouter();
@@ -157,7 +234,7 @@ export function WorkItemSurface({ projectID, itemID, basePath, modal = false }: 
   const [comment, setComment] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"overview" | "definition" | "activity" | "runs">("overview");
+  const [tab, setTab] = useState<"overview" | "definition" | "activity" | "branch-plan" | "runs">("overview");
   const [commentBusy, setCommentBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [transitionBusy, setTransitionBusy] = useState(false);
@@ -366,15 +443,18 @@ export function WorkItemSurface({ projectID, itemID, basePath, modal = false }: 
   const assignmentChanged = assigneeDraft !== (item.assignee_id ?? "");
   const creatorRoles = rolesForCapabilities(["work_item.create"]).map((role) => label(role)).join(", ");
   const nextHandler = memberLabel(assigneeDraft, members);
+  const repositoryID = item.repository_id || specification?.specification?.repository_id || "";
+  const specificationPhase = specificationWorkflowPhase(item.status, workflow);
 
   return <article className={`app-v2-detail ${modal ? "is-modal" : ""}`} aria-labelledby="work-item-heading">
     <header className="app-v2-detail-heading"><div><Link className="app-v2-back-link" href={`${basePath}/backlog`}>← {t("work.back")}</Link><div className="app-v2-item-meta"><span className="app-v2-key">{item.key}</span><span className={`app-v2-status-pill is-${uiTone(item.status)}`}>{label(item.status)}</span><span className={`app-v2-chip is-${uiTone(item.type)}`}>{label(item.type)}</span></div><h2 id="work-item-heading">{item.title}</h2></div><div className="app-v2-detail-actions"><div className="app-v2-action-menu" ref={actionsRef}><button className="button button-secondary" type="button" aria-haspopup="menu" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)} disabled={actionBusy}>{actionBusy ? t("work.processing") : t("work.more-actions")}</button>{actionsOpen ? <div className="app-v2-action-menu-panel" role="menu"><button className="app-v2-action-menu-item" type="button" role="menuitem" onClick={() => void copyLink()}>{t("work.copy-link")}</button><button className="app-v2-action-menu-item is-danger" type="button" role="menuitem" onClick={() => void archiveOrRestoreWorkItem()}>{item.archived_at ? t("work.restore") : t("work.archive")}</button></div> : null}</div></div></header>
-    {orderedStatuses.length ? <div className="app-v2-workflow-strip" aria-label={t("work.workflow-progress")}>{orderedStatuses.map((status) => <div className={`app-v2-workflow-strip-step is-${uiTone(status.key)} ${status.key === item.status ? "is-current" : ""} ${(workflowPositions.get(status.key) ?? 0) < (workflowPositions.get(item.status) ?? 0) ? "is-complete" : ""}`} key={status.key}><span aria-hidden="true" /> <strong>{status.display_name}</strong></div>)}</div> : null}
+    {orderedStatuses.length ? <div className="app-v2-workflow-strip" aria-label={t("work.workflow-progress")} role="list">{orderedStatuses.map((status) => <div className={`app-v2-workflow-strip-step is-${uiTone(status.key)} ${status.key === item.status ? "is-current" : ""} ${(workflowPositions.get(status.key) ?? 0) < (workflowPositions.get(item.status) ?? 0) ? "is-complete" : ""} ${status.key !== item.status && (workflowPositions.get(status.key) ?? 0) >= (workflowPositions.get(item.status) ?? 0) ? "is-upcoming" : ""}`} key={status.key} role="listitem" aria-current={status.key === item.status ? "step" : undefined}><span aria-hidden="true" /> <strong>{status.display_name}</strong>{status.key === item.status ? <small className="app-v2-workflow-current-label">{t("work.current-status")}</small> : null}</div>)}</div> : null}
     {actionMessage ? <p className="app-v2-action-status" role="status">{actionMessage}</p> : null}
-    <nav className="app-v2-tabs" aria-label={t("work.details")}><button className={tab === "overview" ? "is-active" : ""} type="button" onClick={() => setTab("overview")}>{t("work.overview")}</button><button className={tab === "definition" ? "is-active" : ""} type="button" onClick={() => setTab("definition")}>{t("work.definition")}</button><button className={tab === "activity" ? "is-active" : ""} type="button" onClick={() => setTab("activity")}>{t("work.activity")}</button><button className={tab === "runs" ? "is-active" : ""} type="button" onClick={() => setTab("runs")}>{t("work.agent-runs")}</button></nav>
+    <nav className="app-v2-tabs" aria-label={t("work.details")}><button className={tab === "overview" ? "is-active" : ""} type="button" onClick={() => setTab("overview")}>{t("work.overview")}</button><button className={tab === "definition" ? "is-active" : ""} type="button" onClick={() => setTab("definition")}>{t("work.definition")}</button><button className={tab === "activity" ? "is-active" : ""} type="button" onClick={() => setTab("activity")}>{t("work.activity")}</button><button className={tab === "branch-plan" ? "is-active" : ""} type="button" onClick={() => setTab("branch-plan")}>{t("work.branch-plan")}</button><button className={tab === "runs" ? "is-active" : ""} type="button" onClick={() => setTab("runs")}>{t("work.agent-runs")}</button></nav>
     {tab === "overview" ? <div className="app-v2-detail-grid"><section className="app-v2-detail-main"><div className="app-v2-surface-card"><h3>{t("work.context")}</h3><p className="app-v2-prose">{item.description || t("work.no-context-added")}</p></div><section className="app-v2-surface-card app-v2-responsibility-card" aria-labelledby="responsibility-heading"><div className="app-v2-card-heading"><div><h3 id="responsibility-heading">{t("work.responsibility")}</h3><p>{t("work.responsibility-description")}</p></div></div><div className="app-v2-responsibility-grid"><div><span>{t("work.creator")}</span><strong>{memberLabel(item.reporter_id, members)}</strong><small>{t("work.can-create", { roles: creatorRoles })}</small></div><div><span>{t("work.current-handler")}</span><div className="app-v2-assignee-control"><select aria-label={t("work.current-handler")} value={assigneeDraft} onChange={(event) => setAssigneeDraft(event.target.value)} disabled={!canAssign || membersLoading}><option value="">{t("work.unassigned")}</option>{members.map((member) => <option value={member.id} key={member.id}>{memberLabel(member.id, members)}</option>)}{assigneeDraft && !members.some((member) => member.id === assigneeDraft) ? <option value={assigneeDraft}>{assigneeDraft}</option> : null}</select>{canAssign && assignmentChanged ? <button className="button button-secondary" type="button" onClick={() => void saveAssignment()} disabled={assignmentBusy}>{assignmentBusy ? t("work.assignment-saving") : t("work.save-assignment")}</button> : null}</div><small>{canAssign ? t("work.assignee-help") : t("work.assignee-read-only")}</small></div></div><div className="app-v2-handoff"><span>{t("work.next-step")}</span>{selectedTransition ? <><strong>{selectedTransition.display_name} → {label(workflowStatuses.get(selectedTransition.to_status) ?? selectedTransition.to_status)}</strong><small>{t("work.next-handler", { handler: nextHandler })}</small><small>{t("work.transition-actors", { roles: transitionRoles(selectedTransition) })}</small><small>{t("work.transition-requirements", { requirements: transitionRules(selectedTransition) })}</small></> : availableTransitions.length ? <small>{t("work.choose-transition-to-see-actors")}</small> : <small>{t("work.no-next-step")}</small>}</div><details className="app-v2-responsibility-map"><summary>{t("work.show-responsibility-map")}</summary><div className="app-v2-responsibility-list">{orderedTransitions.map((transition) => <div className={transition.from_status === item.status ? "is-current" : ""} key={transition.key}><strong>{workflowStatuses.get(transition.from_status) ?? label(transition.from_status)} → {workflowStatuses.get(transition.to_status) ?? label(transition.to_status)}</strong><span>{transition.display_name}</span><small>{t("work.transition-actors", { roles: transitionRoles(transition) })}</small><small>{t("work.transition-requirements", { requirements: transitionRules(transition) })}</small></div>)}</div></details></section><div className="app-v2-surface-card"><h3>{t("work.next-action")}</h3><p>{t("work.next-action-description")}</p><div className="app-v2-transition-control"><ForgeSelect ariaLabel={`${t("work.choose-transition")} ${t("work.workflow")}`} value={transitionKey} options={[{ value: "", label: t("work.choose-transition") }, ...availableTransitions.map((transition) => ({ value: transition.key, label: transition.display_name }))]} placeholder={t("work.choose-transition")} onChange={setTransitionKey} /><button className="button button-primary" type="button" onClick={() => void transitionWorkItem()} disabled={transitionBusy || !transitionKey}>{transitionBusy ? t("work.moving") : t("work.move")}</button></div></div></section><aside className="app-v2-detail-aside"><div><span>{t("work.status")}</span><strong>{label(item.status)}</strong></div><div><span>{t("work.priority")}</span><strong>{label(item.priority)}</strong></div><div><span>{t("work.version")}</span><strong>{item.version}</strong></div><div><span>{t("work.repository")}</span><strong>{item.repository_id ? t("work.linked") : t("work.not-linked")}</strong></div></aside></div> : null}
-    {tab === "definition" ? <section className="app-v2-detail-stack">{specificationLoading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /><p>{t("work.loading-specification")}</p></div> : specification ? <><div className="app-v2-surface-card"><div className="app-v2-card-heading"><div><h3>{t("work.specification-readiness")}</h3><p>{t("work.specification-description")}</p></div><span className={`app-v2-readiness ${specification.readiness?.ready ? "is-ready" : ""}`}>{specification.readiness?.ready ? t("work.ready") : t("work.gaps", { count: specification.readiness?.missing?.length ?? 0 })}</span></div>{specification.readiness?.missing?.length ? <ul className="app-v2-missing">{specification.readiness.missing.map((missing, index) => <li key={`${missing}-${index}`}>{readinessLabel(missing)}</li>)}</ul> : null}<h4>{item.type === "BUG" ? t("work.problem") : t("work.goal")}</h4><p className="app-v2-prose">{specification.specification?.summary || specification.specification?.fields?.PROBLEM_STATEMENT?.value || specification.specification?.fields?.GOAL?.value || t("work.no-definition")}</p>{specification.readiness?.missing?.includes("HUMAN_REVIEW") ? <button className="button button-primary" type="button" onClick={() => void reviewSpecification()} disabled={reviewBusy}>{reviewBusy ? t("work.reviewing") : t("work.review-specification", { version: specification.specification?.version ?? "" })}</button> : null}</div><SpecificationEditor projectID={projectID} item={item} response={specification} onSaved={setSpecification} onError={setError} /></> : <div className="app-v2-error-panel" role="alert"><strong>{t("work.specification-load-error")}</strong><span>{error || t("work.no-specification-returned")}</span></div>}</section> : null}
+	    {tab === "definition" ? <section className="app-v2-detail-stack">{specificationLoading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /><p>{t("work.loading-specification")}</p></div> : specification ? <><div className="app-v2-surface-card"><div className="app-v2-card-heading"><div><h3>{t("work.specification-readiness")}</h3><p>{t("work.specification-description")}</p></div><span className={`app-v2-readiness ${specification.readiness?.ready ? "is-ready" : ""}`}>{specification.readiness?.ready ? t("work.ready") : t("work.gaps", { count: specification.readiness?.missing?.length ?? 0 })}</span></div>{specification.readiness?.missing?.length ? <ul className="app-v2-missing">{specification.readiness.missing.map((missing, index) => <li key={`${missing}-${index}`}>{readinessLabel(missing)}</li>)}</ul> : null}<h4>{item.type === "BUG" ? t("work.problem") : t("work.goal")}</h4><p className="app-v2-prose">{specification.specification?.summary || specification.specification?.fields?.PROBLEM_STATEMENT?.value || specification.specification?.fields?.GOAL?.value || t("work.no-definition")}</p>{specificationPhase === "REVIEW" && specification.readiness?.missing?.includes("HUMAN_REVIEW") ? <button className="button button-primary" type="button" onClick={() => void reviewSpecification()} disabled={reviewBusy}>{reviewBusy ? t("work.reviewing") : t("work.review-specification", { version: specification.specification?.version ?? "" })}</button> : null}</div><SpecificationEditor projectID={projectID} item={item} workflow={workflow} response={specification} onSaved={setSpecification} onError={setError} /></> : <div className="app-v2-error-panel" role="alert"><strong>{t("work.specification-load-error")}</strong><span>{error || t("work.no-specification-returned")}</span></div>}</section> : null}
     {tab === "activity" ? <section className="app-v2-detail-stack"><div className="app-v2-surface-card"><h3>{t("work.comments")}</h3><div className="app-v2-comments">{comments.length ? comments.map((entry) => <div className="app-v2-comment" key={entry.id}><p>{entry.body}</p><small>{new Intl.DateTimeFormat(typeof document !== "undefined" && document.documentElement.lang === "en" ? "en-US" : "vi-VN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(entry.created_at))}</small></div>) : <p>{t("work.no-comments")}</p>}</div><form className="app-v2-comment-form" onSubmit={addComment}><textarea value={comment} onChange={(event) => setComment(event.target.value)} rows={3} placeholder={t("work.comment-placeholder")} aria-label={t("work.comments")} /><button className="button button-secondary" type="submit" disabled={commentBusy || !comment.trim()}>{commentBusy ? t("work.saving") : t("work.comment")}</button></form></div></section> : null}
-    {tab === "runs" ? <><AutonomousWorkflowPanel projectID={projectID} item={item} authorization={authorization} /><AgentRunsReviewPanel projectID={projectID} basePath={basePath} item={item} authorization={authorization} specificationVersion={specification?.specification?.version} regressionCases={specification?.specification?.regression_test_cases ?? []} /></> : null}
+    {tab === "branch-plan" ? <BranchPlanPanel projectID={projectID} item={item} authorization={authorization} /> : null}
+    {tab === "runs" ? <><AutonomousWorkflowPanel projectID={projectID} item={item} repositoryID={repositoryID} authorization={authorization} /><AgentRunsReviewPanel projectID={projectID} basePath={basePath} item={item} repositoryID={repositoryID} authorization={authorization} specificationVersion={specification?.specification?.version} regressionCases={specification?.specification?.regression_test_cases ?? []} /></> : null}
   </article>;
 }

@@ -373,7 +373,7 @@ func CorrelationID(ctx context.Context) string {
 
 func WithAuthenticator(next http.Handler, authenticator identity.Authenticator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/auth/logout" || r.URL.Path == "/api/v1/auth/github/start" || r.URL.Path == "/api/v1/auth/github/callback" || r.URL.Path == "/api/v1/integrations/github/install/callback" || r.URL.Path == "/api/v1/integrations/github/webhooks" {
+		if r.URL.Path == "/api/v1/auth/logout" || r.URL.Path == "/api/v1/auth/github/start" || r.URL.Path == "/api/v1/auth/github/callback" || r.URL.Path == "/api/v1/integrations/github/install/callback" || r.URL.Path == "/api/v1/integrations/github/user/callback" || r.URL.Path == "/api/v1/integrations/github/webhooks" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -387,7 +387,7 @@ func WithAuthenticator(next http.Handler, authenticator identity.Authenticator) 
 			// /me is part of the bootstrap sequence. It must be able to
 			// authenticate a session before the organization selector has
 			// persisted a choice when the user belongs to more than one org.
-			AllowOrganizationSelection: r.Method == http.MethodGet && (r.URL.Path == "/api/v1/organizations" || r.URL.Path == "/api/v1/me"),
+			AllowOrganizationSelection: (r.Method == http.MethodGet && (r.URL.Path == "/api/v1/organizations" || r.URL.Path == "/api/v1/me")) || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/organizations"),
 		}
 		if authorization := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(authorization, "Bearer ") {
 			request.BearerToken = strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
@@ -422,7 +422,7 @@ func projectIDFromRequest(r *http.Request) string {
 
 func WithDevelopmentActor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/auth/github/start" || r.URL.Path == "/api/v1/auth/github/callback" || r.URL.Path == "/api/v1/integrations/github/install/callback" || r.URL.Path == "/api/v1/integrations/github/webhooks" {
+		if r.URL.Path == "/api/v1/auth/github/start" || r.URL.Path == "/api/v1/auth/github/callback" || r.URL.Path == "/api/v1/integrations/github/install/callback" || r.URL.Path == "/api/v1/integrations/github/user/callback" || r.URL.Path == "/api/v1/integrations/github/webhooks" {
 			next.ServeHTTP(w, r)
 			return
 		}

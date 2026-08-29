@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var resourceLimitPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?(?:[bkmg]i?|[ept])?$`)
 
 type Job struct {
 	ID              string            `json:"id"`
@@ -17,6 +20,8 @@ type Job struct {
 	RepositoryURL   string            `json:"repository_url,omitempty"`
 	BaseSHA         string            `json:"base_sha,omitempty"`
 	Branch          string            `json:"branch,omitempty"`
+	PushBranch      bool              `json:"push_branch,omitempty"`
+	CommitMessage   string            `json:"commit_message,omitempty"`
 	Workspace       string            `json:"workspace"`
 	WorkspaceRoot   string            `json:"workspace_root"`
 	Image           string            `json:"image,omitempty"`
@@ -28,6 +33,7 @@ type Job struct {
 	AllowedHosts    []string          `json:"allowed_hosts,omitempty"`
 	MCPPermissions  []string          `json:"mcp_permissions,omitempty"`
 	Environment     map[string]string `json:"environment,omitempty"`
+	GitToken        string            `json:"-"`
 }
 
 type EventType string
@@ -77,6 +83,20 @@ func (j Job) Validate() error {
 	if err := validateBranch(j.Branch); err != nil {
 		return err
 	}
+	if j.PushBranch {
+		if strings.TrimSpace(j.Branch) == "" || strings.TrimSpace(j.RepositoryURL) == "" {
+			return fmt.Errorf("push_branch requires repository_url and branch")
+		}
+		message := strings.TrimSpace(j.CommitMessage)
+		if message == "" || len([]rune(message)) > 200 || strings.ContainsAny(message, "\x00\r\n") {
+			return fmt.Errorf("commit_message is required and must be a single line of at most 200 characters")
+		}
+	} else if strings.TrimSpace(j.GitToken) != "" {
+		return fmt.Errorf("git token is only allowed when push_branch is enabled")
+	}
+	if len([]byte(j.GitToken)) > 4096 || strings.ContainsAny(j.GitToken, "\x00\r\n") {
+		return fmt.Errorf("git token is invalid")
+	}
 	if !safeWorkspace(j.WorkspaceRoot, j.Workspace) {
 		return fmt.Errorf("workspace must be an existing child of workspace_root")
 	}
@@ -85,6 +105,18 @@ func (j Job) Validate() error {
 	}
 	if j.PidsLimit < 0 || j.PidsLimit > 4096 {
 		return fmt.Errorf("pids_limit is invalid")
+	}
+	if j.CPULimit != "" && !resourceLimitPattern.MatchString(strings.ToLower(strings.TrimSpace(j.CPULimit))) {
+		return fmt.Errorf("cpu_limit is invalid")
+	}
+	if j.MemoryLimit != "" && !resourceLimitPattern.MatchString(strings.ToLower(strings.TrimSpace(j.MemoryLimit))) {
+		return fmt.Errorf("memory_limit is invalid")
+	}
+	if network := strings.ToLower(strings.TrimSpace(j.NetworkMode)); network != "" && network != "none" && network != "bridge" {
+		return fmt.Errorf("network_mode must be none or bridge")
+	}
+	if image := strings.TrimSpace(j.Image); image != "" && (strings.ContainsAny(image, " \t\r\n") || strings.HasSuffix(strings.ToLower(image), ":latest")) {
+		return fmt.Errorf("image must be a pinned image without whitespace or latest tag")
 	}
 	return nil
 }
@@ -137,8 +169,13 @@ func validateBranch(value string) error {
 	if value == "" {
 		return nil
 	}
-	if len(value) > 200 || strings.HasPrefix(value, "-") || strings.Contains(value, "..") || strings.ContainsAny(value, "\x00\n\r ~^:?*[\\") {
+	if value == "HEAD" || len(value) > 200 || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "/") || strings.HasSuffix(value, ".") || strings.Contains(value, "//") || strings.Contains(value, "..") || strings.Contains(value, "@{") || strings.ContainsAny(value, "\x00\n\r ~^:?*[\\") {
 		return fmt.Errorf("branch is invalid")
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || component == "." || component == ".." || strings.HasSuffix(component, ".lock") {
+			return fmt.Errorf("branch is invalid")
+		}
 	}
 	return nil
 }

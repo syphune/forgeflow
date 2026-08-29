@@ -41,6 +41,92 @@ func (s *PostgresStore) ConsumeInstallationState(ctx context.Context, stateHash 
 	return userID, organizationID, nil
 }
 
+func (s *PostgresStore) InstallationOrganization(ctx context.Context, installationID int64) (string, error) {
+	var organizationID string
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT organization_id::text FROM github_installations WHERE github_installation_id=$1`, installationID).Scan(&organizationID)
+	if err == pgx.ErrNoRows {
+		return "", apperr.New(apperr.CodeUnauthorized, 401, "GitHub installation is not linked", nil)
+	}
+	if err != nil {
+		return "", fmt.Errorf("load GitHub installation organization: %w", err)
+	}
+	return organizationID, nil
+}
+
+func (s *PostgresStore) BeginUserAuthorizationState(ctx context.Context, stateHash, userID, organizationID, codeVerifier, redirectURI string, expiresAt time.Time) error {
+	id, err := ids.New()
+	if err != nil {
+		return err
+	}
+	_, err = platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `INSERT INTO github_user_authorization_states (id, state_hash, user_id, organization_id, code_verifier, redirect_uri, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, id, stateHash, userID, organizationID, codeVerifier, redirectURI, expiresAt.UTC())
+	if err != nil {
+		return fmt.Errorf("store GitHub user authorization state: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ConsumeUserAuthorizationState(ctx context.Context, stateHash string) (string, string, string, string, error) {
+	var userID, organizationID, verifier, redirectURI string
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `UPDATE github_user_authorization_states SET used_at=now() WHERE state_hash=$1 AND used_at IS NULL AND expires_at > now() RETURNING user_id::text, organization_id::text, code_verifier, redirect_uri`, stateHash).Scan(&userID, &organizationID, &verifier, &redirectURI)
+	if err == pgx.ErrNoRows {
+		return "", "", "", "", apperr.New(apperr.CodeUnauthorized, 401, "GitHub user authorization state is invalid or expired", nil)
+	}
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("consume GitHub user authorization state: %w", err)
+	}
+	return userID, organizationID, verifier, redirectURI, nil
+}
+
+func (s *PostgresStore) GitHubUserID(ctx context.Context, userID string) (int64, error) {
+	var githubUserID int64
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT COALESCE(github_user_id,0) FROM users WHERE id=$1`, userID).Scan(&githubUserID)
+	if err == pgx.ErrNoRows || githubUserID <= 0 {
+		return 0, apperr.New(apperr.CodeNotFound, 404, "Forgeflow user is not linked to GitHub", nil)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("load Forgeflow GitHub user: %w", err)
+	}
+	return githubUserID, nil
+}
+
+func (s *PostgresStore) UpsertUserCredential(ctx context.Context, userID string, credential StoredUserCredential) error {
+	_, err := platformdb.ExecutorFrom(ctx, s.pool).Exec(ctx, `
+INSERT INTO github_user_credentials (user_id, github_user_id, encrypted_access_token, encrypted_refresh_token, access_token_expires_at, refresh_token_expires_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,now())
+ON CONFLICT (user_id) DO UPDATE SET github_user_id=EXCLUDED.github_user_id, encrypted_access_token=EXCLUDED.encrypted_access_token, encrypted_refresh_token=EXCLUDED.encrypted_refresh_token, access_token_expires_at=EXCLUDED.access_token_expires_at, refresh_token_expires_at=EXCLUDED.refresh_token_expires_at, updated_at=now()
+`, userID, credential.GitHubUserID, credential.EncryptedAccessToken, credential.EncryptedRefreshToken, nullableTime(credential.AccessTokenExpiresAt), nullableTime(credential.RefreshTokenExpiresAt))
+	if err != nil {
+		return fmt.Errorf("store GitHub user credential: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetUserCredential(ctx context.Context, userID string) (StoredUserCredential, error) {
+	var credential StoredUserCredential
+	var accessExpiresAt, refreshExpiresAt *time.Time
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `SELECT github_user_id, encrypted_access_token, encrypted_refresh_token, access_token_expires_at, refresh_token_expires_at FROM github_user_credentials WHERE user_id=$1`, userID).Scan(&credential.GitHubUserID, &credential.EncryptedAccessToken, &credential.EncryptedRefreshToken, &accessExpiresAt, &refreshExpiresAt)
+	if err == pgx.ErrNoRows {
+		return StoredUserCredential{}, apperr.New(apperr.CodeNotFound, 404, "GitHub code authorization is not connected", nil)
+	}
+	if err != nil {
+		return StoredUserCredential{}, fmt.Errorf("load GitHub user credential: %w", err)
+	}
+	if accessExpiresAt != nil {
+		credential.AccessTokenExpiresAt = accessExpiresAt.UTC()
+	}
+	if refreshExpiresAt != nil {
+		credential.RefreshTokenExpiresAt = refreshExpiresAt.UTC()
+	}
+	return credential, nil
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
+}
+
 func (s *PostgresStore) UpsertInstallation(ctx context.Context, organizationID string, installationID int64, accountLogin string) (Installation, error) {
 	var result Installation
 	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
@@ -204,7 +290,7 @@ func (s *PostgresStore) ListCommits(ctx context.Context, organizationID, reposit
 }
 
 func (s *PostgresStore) ListPullRequests(ctx context.Context, organizationID, repositoryID string) ([]PullRequest, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text, repository_id::text, COALESCE(work_item_id::text,''), number, title, state, draft, head_sha, head_ref, body, url, updated_at FROM pull_requests WHERE organization_id=$1 AND repository_id=$2 ORDER BY updated_at DESC, number DESC LIMIT 100`, organizationID, repositoryID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text, repository_id::text, COALESCE(work_item_id::text,''), number, title, state, draft, head_sha, head_ref, base_ref, body, url, COALESCE(author_login,''), changed_paths, approved_by_logins, changes_requested, merged, updated_at FROM pull_requests WHERE organization_id=$1 AND repository_id=$2 ORDER BY updated_at DESC, number DESC LIMIT 100`, organizationID, repositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("list repository pull requests: %w", err)
 	}
@@ -212,7 +298,7 @@ func (s *PostgresStore) ListPullRequests(ctx context.Context, organizationID, re
 	result := make([]PullRequest, 0)
 	for rows.Next() {
 		var item PullRequest
-		if err := rows.Scan(&item.ID, &item.RepositoryID, &item.WorkItemID, &item.Number, &item.Title, &item.State, &item.Draft, &item.HeadSHA, &item.HeadRef, &item.Body, &item.URL, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.RepositoryID, &item.WorkItemID, &item.Number, &item.Title, &item.State, &item.Draft, &item.HeadSHA, &item.HeadRef, &item.BaseRef, &item.Body, &item.URL, &item.AuthorLogin, &item.ChangedPaths, &item.ApprovedByLogins, &item.ChangesRequested, &item.Merged, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan repository pull request: %w", err)
 		}
 		result = append(result, item)
@@ -230,12 +316,12 @@ func (s *PostgresStore) UpsertPullRequest(ctx context.Context, organizationID, r
 	}
 	var result PullRequest
 	err = platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
-INSERT INTO pull_requests (id, organization_id, repository_id, work_item_id, number, title, state, draft, head_sha, head_ref, body, url, updated_at)
-VALUES ($1,$2,$3,NULLIF($4,'')::uuid,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+INSERT INTO pull_requests (id, organization_id, repository_id, work_item_id, number, title, state, draft, head_sha, head_ref, base_ref, body, url, author_login, changed_paths, approved_by_logins, changes_requested, merged, updated_at)
+VALUES ($1,$2,$3,NULLIF($4,'')::uuid,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 ON CONFLICT (organization_id, repository_id, number)
-DO UPDATE SET work_item_id=COALESCE(EXCLUDED.work_item_id,pull_requests.work_item_id), title=EXCLUDED.title, state=EXCLUDED.state, draft=EXCLUDED.draft, head_sha=EXCLUDED.head_sha, head_ref=EXCLUDED.head_ref, body=EXCLUDED.body, url=EXCLUDED.url, updated_at=EXCLUDED.updated_at
-RETURNING id::text, repository_id::text, COALESCE(work_item_id::text,''), number, title, state, draft, head_sha, head_ref, body, url, updated_at
-`, id, organizationID, repositoryID, item.WorkItemID, item.Number, strings.TrimSpace(item.Title), strings.TrimSpace(item.State), item.Draft, strings.TrimSpace(item.HeadSHA), strings.TrimSpace(item.HeadRef), item.Body, strings.TrimSpace(item.URL), item.UpdatedAt.UTC()).Scan(&result.ID, &result.RepositoryID, &result.WorkItemID, &result.Number, &result.Title, &result.State, &result.Draft, &result.HeadSHA, &result.HeadRef, &result.Body, &result.URL, &result.UpdatedAt)
+DO UPDATE SET work_item_id=COALESCE(EXCLUDED.work_item_id,pull_requests.work_item_id), title=EXCLUDED.title, state=EXCLUDED.state, draft=EXCLUDED.draft, head_sha=EXCLUDED.head_sha, head_ref=EXCLUDED.head_ref, base_ref=EXCLUDED.base_ref, body=EXCLUDED.body, url=EXCLUDED.url, author_login=EXCLUDED.author_login, changed_paths=EXCLUDED.changed_paths, approved_by_logins=EXCLUDED.approved_by_logins, changes_requested=EXCLUDED.changes_requested, merged=EXCLUDED.merged, updated_at=EXCLUDED.updated_at
+RETURNING id::text, repository_id::text, COALESCE(work_item_id::text,''), number, title, state, draft, head_sha, head_ref, base_ref, body, url, COALESCE(author_login,''), changed_paths, approved_by_logins, changes_requested, merged, updated_at
+`, id, organizationID, repositoryID, item.WorkItemID, item.Number, strings.TrimSpace(item.Title), strings.TrimSpace(item.State), item.Draft, strings.TrimSpace(item.HeadSHA), strings.TrimSpace(item.HeadRef), strings.TrimSpace(item.BaseRef), item.Body, strings.TrimSpace(item.URL), strings.TrimSpace(item.AuthorLogin), item.ChangedPaths, item.ApprovedByLogins, item.ChangesRequested, item.Merged, item.UpdatedAt.UTC()).Scan(&result.ID, &result.RepositoryID, &result.WorkItemID, &result.Number, &result.Title, &result.State, &result.Draft, &result.HeadSHA, &result.HeadRef, &result.BaseRef, &result.Body, &result.URL, &result.AuthorLogin, &result.ChangedPaths, &result.ApprovedByLogins, &result.ChangesRequested, &result.Merged, &result.UpdatedAt)
 	if err != nil {
 		return PullRequest{}, fmt.Errorf("upsert pull request: %w", err)
 	}
@@ -249,7 +335,8 @@ SELECT EXISTS (
     SELECT 1
     FROM pull_requests pr
     JOIN work_items wi ON wi.organization_id=pr.organization_id AND wi.id=pr.work_item_id
-    WHERE pr.organization_id=$1 AND wi.project_id=$2 AND pr.repository_id=$3 AND wi.key=$4
+    JOIN projects p ON p.organization_id=wi.organization_id AND p.id=wi.project_id
+    WHERE pr.organization_id=$1 AND wi.project_id=$2 AND pr.repository_id=$3 AND p.key || '-' || wi.number=$4
 )
 `, organizationID, projectID, repositoryID, strings.TrimSpace(workItemKey)).Scan(&exists)
 	if err != nil {
@@ -269,8 +356,9 @@ SELECT EXISTS (
      AND pr.repository_id=ci.repository_id
      AND pr.head_sha=ci.sha
     JOIN work_items wi ON wi.organization_id=pr.organization_id AND wi.id=pr.work_item_id
+    JOIN projects p ON p.organization_id=wi.organization_id AND p.id=wi.project_id
     WHERE ci.organization_id=$1 AND wi.project_id=$2 AND ci.repository_id=$3
-      AND wi.key=$4 AND lower(ci.conclusion)='success'
+      AND p.key || '-' || wi.number=$4 AND lower(ci.conclusion)='success'
 )
 `, organizationID, projectID, repositoryID, strings.TrimSpace(workItemKey)).Scan(&exists)
 	if err != nil {
@@ -279,8 +367,65 @@ SELECT EXISTS (
 	return exists, nil
 }
 
+func (s *PostgresStore) GetPullRequest(ctx context.Context, organizationID, projectID, repositoryID, workItemKey, currentSHA string) (PullRequest, bool, error) {
+	var item PullRequest
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+SELECT pr.id::text, pr.repository_id::text, COALESCE(pr.work_item_id::text,''), pr.number, pr.title, pr.state, pr.draft, pr.head_sha, COALESCE(pr.head_ref,''), COALESCE(pr.base_ref,''), COALESCE(pr.body,''), COALESCE(pr.url,''), COALESCE(pr.author_login,''), pr.changed_paths, pr.approved_by_logins, pr.changes_requested, pr.merged, pr.updated_at
+FROM pull_requests pr
+JOIN work_items wi ON wi.organization_id=pr.organization_id AND wi.id=pr.work_item_id
+JOIN projects p ON p.organization_id=wi.organization_id AND p.id=wi.project_id
+WHERE pr.organization_id=$1 AND wi.project_id=$2 AND ($3='' OR pr.repository_id=$3) AND (p.key || '-' || wi.number=$4 OR wi.id::text=$4) AND ($5='' OR pr.head_sha=$5)
+ORDER BY pr.updated_at DESC, pr.number DESC
+LIMIT 1`, organizationID, projectID, repositoryID, strings.TrimSpace(workItemKey), strings.TrimSpace(currentSHA)).Scan(&item.ID, &item.RepositoryID, &item.WorkItemID, &item.Number, &item.Title, &item.State, &item.Draft, &item.HeadSHA, &item.HeadRef, &item.BaseRef, &item.Body, &item.URL, &item.AuthorLogin, &item.ChangedPaths, &item.ApprovedByLogins, &item.ChangesRequested, &item.Merged, &item.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return PullRequest{}, false, nil
+	}
+	if err != nil {
+		return PullRequest{}, false, fmt.Errorf("get pull request evidence: %w", err)
+	}
+	return item, true, nil
+}
+
+func (s *PostgresStore) HasRequiredCI(ctx context.Context, organizationID, projectID, repositoryID, workItemKey, currentSHA string, required []string) (bool, error) {
+	currentSHA = strings.TrimSpace(currentSHA)
+	if currentSHA == "" {
+		return false, nil
+	}
+	var result bool
+	if len(required) == 0 {
+		err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM ci_runs ci
+  JOIN pull_requests pr ON pr.organization_id=ci.organization_id AND pr.repository_id=ci.repository_id AND pr.head_sha=ci.sha
+  JOIN work_items wi ON wi.organization_id=pr.organization_id AND wi.id=pr.work_item_id
+  JOIN projects p ON p.organization_id=wi.organization_id AND p.id=wi.project_id
+  WHERE ci.organization_id=$1 AND wi.project_id=$2 AND ci.repository_id=$3 AND p.key || '-' || wi.number=$4 AND ci.sha=$5 AND lower(ci.conclusion)='success'
+)`, organizationID, projectID, repositoryID, strings.TrimSpace(workItemKey), currentSHA).Scan(&result)
+		if err != nil {
+			return false, fmt.Errorf("check current-head CI: %w", err)
+		}
+		return result, nil
+	}
+	err := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pull_requests pr
+  JOIN work_items wi ON wi.organization_id=pr.organization_id AND wi.id=pr.work_item_id
+  JOIN projects p ON p.organization_id=wi.organization_id AND p.id=wi.project_id
+  WHERE pr.organization_id=$1 AND wi.project_id=$2 AND pr.repository_id=$3 AND p.key || '-' || wi.number=$4 AND pr.head_sha=$5
+) AND COALESCE((
+  SELECT bool_and(EXISTS (
+    SELECT 1 FROM ci_runs ci
+    WHERE ci.organization_id=$1 AND ci.repository_id=$3 AND ci.sha=$5 AND lower(ci.check_name)=lower(required.check_name) AND lower(ci.conclusion)='success'
+  )) FROM unnest($6::text[]) AS required(check_name)
+), false)`, organizationID, projectID, repositoryID, strings.TrimSpace(workItemKey), currentSHA, required).Scan(&result)
+	if err != nil {
+		return false, fmt.Errorf("check required current-head CI: %w", err)
+	}
+	return result, nil
+}
+
 func (s *PostgresStore) ListCIRuns(ctx context.Context, organizationID, repositoryID string) ([]CIRun, error) {
-	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text, repository_id::text, external_id, status, conclusion, sha, url, updated_at FROM ci_runs WHERE organization_id=$1 AND repository_id=$2 ORDER BY updated_at DESC, external_id DESC LIMIT 100`, organizationID, repositoryID)
+	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, `SELECT id::text, repository_id::text, external_id, check_name, status, conclusion, sha, url, updated_at FROM ci_runs WHERE organization_id=$1 AND repository_id=$2 ORDER BY updated_at DESC, external_id DESC LIMIT 100`, organizationID, repositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("list repository CI runs: %w", err)
 	}
@@ -288,7 +433,7 @@ func (s *PostgresStore) ListCIRuns(ctx context.Context, organizationID, reposito
 	result := make([]CIRun, 0)
 	for rows.Next() {
 		var item CIRun
-		if err := rows.Scan(&item.ID, &item.RepositoryID, &item.ExternalID, &item.Status, &item.Conclusion, &item.SHA, &item.URL, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.RepositoryID, &item.ExternalID, &item.CheckName, &item.Status, &item.Conclusion, &item.SHA, &item.URL, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan repository CI run: %w", err)
 		}
 		result = append(result, item)

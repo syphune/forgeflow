@@ -21,6 +21,7 @@ func NewHandler(service *Service, maxBody int64) http.Handler {
 	h := &Handler{service: service, maxBody: maxBody}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /organizations", h.listOrganizations)
+	mux.HandleFunc("POST /organizations", h.createOrganization)
 	mux.HandleFunc("GET /organizations/current", h.organization)
 	mux.HandleFunc("GET /organizations/{id}/authorization", h.organizationAuthorization)
 	mux.HandleFunc("GET /organizations/current/members", h.listOrganizationMembers)
@@ -34,6 +35,8 @@ func NewHandler(service *Service, maxBody int64) http.Handler {
 	mux.HandleFunc("GET /projects", h.listProjects)
 	mux.HandleFunc("POST /projects", h.createProject)
 	mux.HandleFunc("PATCH /projects/{id}", h.updateProject)
+	mux.HandleFunc("GET /projects/{id}/board-settings", h.getProjectBoardSettings)
+	mux.HandleFunc("PUT /projects/{id}/board-settings", h.updateProjectBoardSettings)
 	mux.HandleFunc("GET /projects/{id}/authorization", h.projectAuthorization)
 	mux.HandleFunc("GET /projects/{id}/members", h.listMembers)
 	mux.HandleFunc("PUT /projects/{id}/members/{user_id}", h.setMember)
@@ -81,7 +84,7 @@ func (h *Handler) projectAuthorization(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listOrganizations(w http.ResponseWriter, r *http.Request) {
-	actor, err := currentActor(r)
+	actor, err := authenticatedActor(r)
 	if err != nil {
 		httpapi.Error(w, r, err)
 		return
@@ -92,6 +95,30 @@ func (h *Handler) listOrganizations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type organizationRequest struct {
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+}
+
+func (h *Handler) createOrganization(w http.ResponseWriter, r *http.Request) {
+	actor, err := authenticatedActor(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	var input organizationRequest
+	if err := decodeJSON(w, r, h.maxBody, &input); err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	item, err := h.service.CreateOrganization(r.Context(), actor, input.Slug, input.DisplayName)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusCreated, item)
 }
 
 func (h *Handler) listOrganizationMembers(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +324,43 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request) {
 	httpapi.JSON(w, http.StatusOK, item)
 }
 
+func (h *Handler) getProjectBoardSettings(w http.ResponseWriter, r *http.Request) {
+	actor, err := currentActor(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	settings, err := h.service.GetProjectBoardSettings(r.Context(), actor, r.PathValue("id"))
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusOK, settings)
+}
+
+type projectBoardSettingsRequest struct {
+	DoneVisibilityDays int `json:"done_visibility_days"`
+}
+
+func (h *Handler) updateProjectBoardSettings(w http.ResponseWriter, r *http.Request) {
+	actor, err := currentActor(r)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	var input projectBoardSettingsRequest
+	if err := decodeJSON(w, r, h.maxBody, &input); err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	settings, err := h.service.UpdateProjectBoardSettings(r.Context(), actor, r.PathValue("id"), input.DoneVisibilityDays)
+	if err != nil {
+		httpapi.Error(w, r, err)
+		return
+	}
+	httpapi.JSON(w, http.StatusOK, settings)
+}
+
 func (h *Handler) listMembers(w http.ResponseWriter, r *http.Request) {
 	actor, err := currentActor(r)
 	if err != nil {
@@ -352,8 +416,19 @@ func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
 }
 
 func currentActor(r *http.Request) (identity.Actor, error) {
+	actor, err := authenticatedActor(r)
+	if err != nil {
+		return identity.Actor{}, err
+	}
+	if strings.TrimSpace(actor.OrganizationID) == "" {
+		return identity.Actor{}, apperr.New(apperr.CodeUnauthorized, 401, "authenticated organization is required", nil)
+	}
+	return actor, nil
+}
+
+func authenticatedActor(r *http.Request) (identity.Actor, error) {
 	actor, ok := identity.ActorFromContext(r.Context())
-	if !ok || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.OrganizationID) == "" {
+	if !ok || strings.TrimSpace(actor.ID) == "" {
 		return identity.Actor{}, apperr.New(apperr.CodeUnauthorized, 401, "authenticated actor is required", nil)
 	}
 	return actor, nil

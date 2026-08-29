@@ -8,15 +8,19 @@ import (
 )
 
 const (
-	Raw            = "RAW"
-	Refining       = "REFINING"
-	ReviewRequired = "REVIEW_REQUIRED"
-	Ready          = "READY"
-	InProgress     = "IN_PROGRESS"
-	CodeReview     = "CODE_REVIEW"
-	QA             = "QA"
-	Done           = "DONE"
-	Cancelled      = "CANCELLED"
+	Raw              = "RAW"
+	Refining         = "REFINING"
+	ReviewRequired   = "REVIEW_REQUIRED"
+	Ready            = "READY"
+	InProgress       = "IN_PROGRESS"
+	CodeReview       = "CODE_REVIEW"
+	QA               = "QA"
+	ReadyForRelease  = "READY_FOR_RELEASE"
+	Deploying        = "DEPLOYING"
+	ProductionVerify = "PRODUCTION_VERIFY"
+	Done             = "DONE"
+	RolledBack       = "ROLLED_BACK"
+	Cancelled        = "CANCELLED"
 )
 
 type Status struct {
@@ -30,13 +34,22 @@ type Status struct {
 type RuleType string
 
 const (
-	RequireSpecificationReady RuleType = "require_specification_ready"
-	RequireHumanVerification  RuleType = "require_human_verification"
-	RequireAssignee           RuleType = "require_assignee"
-	RequireRepository         RuleType = "require_repository"
-	RequirePullRequest        RuleType = "require_pull_request"
-	RequireCISuccess          RuleType = "require_ci_success"
-	RequirePermission         RuleType = "require_permission"
+	RequireSpecificationReady     RuleType = "require_specification_ready"
+	RequireHumanVerification      RuleType = "require_human_verification"
+	RequireAssignee               RuleType = "require_assignee"
+	RequireRepository             RuleType = "require_repository"
+	RequirePullRequest            RuleType = "require_pull_request"
+	RequireCISuccess              RuleType = "require_ci_success"
+	RequirePermission             RuleType = "require_permission"
+	RequireBranchPlan             RuleType = "require_branch_plan"
+	RequireBranchSync             RuleType = "require_branch_sync"
+	RequireCurrentCIChecks        RuleType = "require_current_ci_checks"
+	RequirePullRequestReview      RuleType = "require_pull_request_review"
+	RequireQAPassing              RuleType = "require_qa_passing"
+	RequireReleaseApproval        RuleType = "require_release_approval"
+	RequireDeploymentSuccess      RuleType = "require_deployment_success"
+	RequireProductionVerification RuleType = "require_production_verification"
+	RequireRollbackPlan           RuleType = "require_rollback_plan"
 )
 
 type Transition struct {
@@ -220,11 +233,55 @@ func appendMissingRule(rules []RuleType, required RuleType) []RuleType {
 
 func validRule(rule RuleType) bool {
 	switch rule {
-	case RequireSpecificationReady, RequireHumanVerification, RequireAssignee, RequireRepository, RequirePullRequest, RequireCISuccess, RequirePermission:
+	case RequireSpecificationReady, RequireHumanVerification, RequireAssignee, RequireRepository, RequirePullRequest, RequireCISuccess, RequirePermission, RequireBranchPlan, RequireBranchSync, RequireCurrentCIChecks, RequirePullRequestReview, RequireQAPassing, RequireReleaseApproval, RequireDeploymentSuccess, RequireProductionVerification, RequireRollbackPlan:
 		return true
 	default:
 		return false
 	}
+}
+
+// ReleaseGatedInput keeps development completion separate from production
+// delivery. Projects opt into this template explicitly.
+func ReleaseGatedInput() SaveInput {
+	statuses := []Status{
+		{Key: Raw, Name: "Raw", Category: "TODO", Position: 10},
+		{Key: Refining, Name: "Refining", Category: "TODO", Position: 20},
+		{Key: ReviewRequired, Name: "Review required", Category: "TODO", Position: 30},
+		{Key: Ready, Name: "Ready", Category: "TODO", Position: 40},
+		{Key: InProgress, Name: "In progress", Category: "IN_PROGRESS", Position: 50},
+		{Key: CodeReview, Name: "Code review", Category: "IN_PROGRESS", Position: 60},
+		{Key: QA, Name: "QA", Category: "IN_PROGRESS", Position: 70},
+		{Key: ReadyForRelease, Name: "Ready for release", Category: "IN_PROGRESS", Position: 80},
+		{Key: Deploying, Name: "Deploying", Category: "IN_PROGRESS", Position: 90},
+		{Key: ProductionVerify, Name: "Production verify", Category: "IN_PROGRESS", Position: 100},
+		{Key: Done, Name: "Done", Category: "DONE", Position: 110, IsTerminal: true},
+		{Key: RolledBack, Name: "Rolled back", Category: "CANCELLED", Position: 120, IsTerminal: true},
+		{Key: Cancelled, Name: "Cancelled", Category: "CANCELLED", Position: 130, IsTerminal: true},
+	}
+	transitions := []Transition{
+		{Key: "start_refining", From: Raw, To: Refining, Name: "Start refining"},
+		{Key: "request_review", From: Refining, To: ReviewRequired, Name: "Request review"},
+		{Key: "mark_ready", From: ReviewRequired, To: Ready, Name: "Mark ready", Required: []RuleType{RequireSpecificationReady}},
+		{Key: "start_work", From: Ready, To: InProgress, Name: "Start work", Required: []RuleType{RequireAssignee, RequireRepository, RequireBranchPlan}},
+		{Key: "submit_code_review", From: InProgress, To: CodeReview, Name: "Submit code review", Required: []RuleType{RequirePullRequest, RequirePullRequestReview}},
+		{Key: "request_changes", From: CodeReview, To: InProgress, Name: "Request changes"},
+		{Key: "move_to_qa", From: CodeReview, To: QA, Name: "Move to QA", Required: []RuleType{RequireCurrentCIChecks}},
+		{Key: "qa_failed", From: QA, To: InProgress, Name: "Return to implementation"},
+		{Key: "prepare_release", From: QA, To: ReadyForRelease, Name: "Prepare release", Required: []RuleType{RequireCurrentCIChecks, RequirePullRequestReview, RequireQAPassing, RequireRollbackPlan}},
+		{Key: "start_deploy", From: ReadyForRelease, To: Deploying, Name: "Start deployment", Required: []RuleType{RequireReleaseApproval}},
+		{Key: "verify_production", From: Deploying, To: ProductionVerify, Name: "Verify deployment", Required: []RuleType{RequireDeploymentSuccess}},
+		{Key: "complete_release", From: ProductionVerify, To: Done, Name: "Complete release", Required: []RuleType{RequireProductionVerification, RequireHumanVerification}},
+		{Key: "release_failed", From: ReadyForRelease, To: RolledBack, Name: "Roll back release", Required: []RuleType{RequireRollbackPlan}},
+		{Key: "deployment_failed", From: Deploying, To: RolledBack, Name: "Roll back deployment", Required: []RuleType{RequireRollbackPlan}},
+		{Key: "verification_failed", From: ProductionVerify, To: RolledBack, Name: "Roll back after verification", Required: []RuleType{RequireRollbackPlan}},
+		{Key: "cancel", From: Raw, To: Cancelled, Name: "Cancel"},
+		{Key: "cancel_from_refining", From: Refining, To: Cancelled, Name: "Cancel"},
+		{Key: "cancel_from_review", From: ReviewRequired, To: Cancelled, Name: "Cancel"},
+		{Key: "cancel_from_ready", From: Ready, To: Cancelled, Name: "Cancel"},
+		{Key: "cancel_from_progress", From: InProgress, To: Cancelled, Name: "Cancel"},
+		{Key: "cancel_from_code_review", From: CodeReview, To: Cancelled, Name: "Cancel"},
+	}
+	return SaveInput{Name: "Release-gated", Statuses: statuses, Transitions: transitions}
 }
 
 func Default() Workflow {
@@ -247,12 +304,12 @@ func Default() Workflow {
 		{Key: "start_refining", From: Raw, To: Refining, Name: "Start refining"},
 		{Key: "request_review", From: Refining, To: ReviewRequired, Name: "Request review"},
 		{Key: "mark_ready", From: ReviewRequired, To: Ready, Name: "Mark ready", Required: []RuleType{RequireSpecificationReady}},
-		{Key: "start_work", From: Ready, To: InProgress, Name: "Start work", Required: []RuleType{RequireAssignee, RequireRepository}},
+		{Key: "start_work", From: Ready, To: InProgress, Name: "Start work", Required: []RuleType{RequireAssignee, RequireRepository, RequireBranchPlan}},
 		{Key: "submit_code_review", From: InProgress, To: CodeReview, Name: "Submit code review", Required: []RuleType{RequirePullRequest}},
 		{Key: "request_changes", From: CodeReview, To: InProgress, Name: "Request changes"},
 		{Key: "move_to_qa", From: CodeReview, To: QA, Name: "Move to QA", Required: []RuleType{RequireCISuccess}},
 		{Key: "qa_failed", From: QA, To: InProgress, Name: "Return to implementation"},
-		{Key: "complete", From: QA, To: Done, Name: "Complete", Required: []RuleType{RequireHumanVerification}},
+		{Key: "complete", From: QA, To: Done, Name: "Complete", Required: []RuleType{RequireHumanVerification, RequireBranchSync}},
 		{Key: "cancel", From: Raw, To: Cancelled, Name: "Cancel"},
 		{Key: "cancel_from_refining", From: Refining, To: Cancelled, Name: "Cancel"},
 		{Key: "cancel_from_review", From: ReviewRequired, To: Cancelled, Name: "Cancel"},
