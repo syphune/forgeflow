@@ -51,6 +51,60 @@ func TestWithAuthenticatorAllowsOrganizationCreationWithoutSelection(t *testing.
 	}
 }
 
+func TestWithAuthenticatorAcceptsRunScopedMCPToken(t *testing.T) {
+	now := time.Now().UTC()
+	token, err := identity.IssueRunnerMCPToken("runner-secret", identity.RunnerMCPClaims{
+		OrganizationID: "org-1",
+		ProjectID:      "project-1",
+		AgentRunID:     "run-1",
+		Permissions:    []string{"agent_run.get"},
+		ExpiresAt:      now.Add(time.Hour).Unix(),
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := &captureAuthenticator{}
+	handler := WithAuthenticator(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := identity.ActorFromContext(r.Context())
+		if !ok || actor.Type != "agent" || actor.ID != "run-1" {
+			t.Fatalf("actor = %#v, present = %t", actor, ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}), authenticator, "runner-secret")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/mcp?project_id=project-1", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if authenticator.request.BearerToken != "" {
+		t.Fatal("run-scoped MCP token must not be passed to the normal authenticator")
+	}
+}
+
+func TestWithAuthenticatorRejectsRunScopedMCPTokenForAnotherProject(t *testing.T) {
+	now := time.Now().UTC()
+	token, err := identity.IssueRunnerMCPToken("runner-secret", identity.RunnerMCPClaims{
+		OrganizationID: "org-1",
+		ProjectID:      "project-1",
+		AgentRunID:     "run-1",
+		Permissions:    []string{"agent_run.get"},
+		ExpiresAt:      now.Add(time.Hour).Unix(),
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := WithAuthenticator(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }), &captureAuthenticator{}, "runner-secret")
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/mcp?project_id=project-2", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
 func TestProjectIDFromRequest(t *testing.T) {
 	tests := []struct {
 		name   string

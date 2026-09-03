@@ -26,6 +26,7 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/platform/httpapi"
 	platformidempotency "github.com/forgeflow/forgeflow/backend/internal/platform/idempotency"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
+	"github.com/forgeflow/forgeflow/backend/internal/runner"
 	"github.com/forgeflow/forgeflow/backend/internal/specification"
 	"github.com/forgeflow/forgeflow/backend/internal/tenant"
 	"github.com/forgeflow/forgeflow/backend/internal/workflow"
@@ -106,10 +107,11 @@ func New(maxBodyBytes int64) *App {
 	ready := func(context.Context) error { return nil }
 	idempotencyStore := platformidempotency.NewMemoryStore()
 	branchPlanHandler := branchplan.NewHandler(branchPlanService, workItemService, maxBodyBytes)
-	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandler(nil, nil, maxBodyBytes), tenant.NewHandler(tenantService, maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandlerWithProjectSettings(workItemService, workflowService, tenantService, now), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(github.NewMemoryWebhookStore(), "", maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, "/", idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), branchPlanHandler, mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, tenantService, planningService, maxBodyBytes, integrationService), nil, true, maxBodyBytes, ready, idempotencyStore, tenantService), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, Tenant: tenantService, Planning: planningService, BranchPlans: branchPlanService, GitHub: integrationService, RepositoryIndex: snapshotService, Close: func() error { return nil }}
+	providerAuthHandler := runner.NewProviderAuthHandler(nil)
+	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandler(nil, nil, maxBodyBytes), tenant.NewHandler(tenantService, maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandlerWithProjectSettings(workItemService, workflowService, tenantService, now), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(github.NewMemoryWebhookStore(), "", maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, "/", idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), branchPlanHandler, mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, tenantService, planningService, maxBodyBytes, integrationService), providerAuthHandler, nil, true, maxBodyBytes, ready, idempotencyStore, tenantService), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, Tenant: tenantService, Planning: planningService, BranchPlans: branchPlanService, GitHub: integrationService, RepositoryIndex: snapshotService, Close: func() error { return nil }}
 }
 
-func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64, developmentAuth bool, oauthConfig auth.OAuthConfig, githubWebhookSecret string, attachmentConfig attachment.StorageConfig, githubAppConfigs ...github.AppConfig) (*App, error) {
+func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64, developmentAuth bool, oauthConfig auth.OAuthConfig, githubWebhookSecret string, attachmentConfig attachment.StorageConfig, runnerURL, runnerToken string, githubAppConfigs ...github.AppConfig) (*App, error) {
 	pool, err := db.Open(ctx, databaseURL)
 	if err != nil {
 		return nil, err
@@ -175,10 +177,11 @@ func NewWithDatabase(ctx context.Context, databaseURL string, maxBodyBytes int64
 	webhookStore.SetBranchPlanProjector(branchPlanService)
 	idempotencyStore := platformidempotency.NewPostgresStore(pool)
 	branchPlanHandler := branchplan.NewHandler(branchPlanService, workItemService, maxBodyBytes)
-	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandlerWithOAuth(tokenStore, tokenStore, oauthHandler, maxBodyBytes), tenant.NewHandler(tenantService, maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandlerWithProjectSettings(workItemService, workflowService, tenantService, now), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(webhookStore, githubWebhookSecret, maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, oauthConfig.SuccessRedirect, idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), branchPlanHandler, mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, tenantService, planningService, maxBodyBytes, integrationService), authenticator, developmentAuth, maxBodyBytes, ready, idempotencyStore, tenantService), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, Tenant: tenantService, Planning: planningService, BranchPlans: branchPlanService, GitHub: integrationService, RepositoryIndex: snapshotService, Authenticator: authenticator, Close: func() error { pool.Close(); return nil }}, nil
+	providerAuthHandler := runner.NewProviderAuthHandler(runner.HTTPAuthClient{BaseURL: runnerURL, Token: runnerToken})
+	return &App{Handler: composeHandler(workItemService, specService, workflowService, auth.NewHandlerWithOAuth(tokenStore, tokenStore, oauthHandler, maxBodyBytes), tenant.NewHandler(tenantService, maxBodyBytes), planning.NewHandler(planningService, maxBodyBytes), board.NewHandlerWithProjectSettings(workItemService, workflowService, tenantService, now), agentrun.NewHandler(agentRunService, maxBodyBytes), autonomous.NewHandler(autonomousService, maxBodyBytes), environment.NewHandler(environmentService, maxBodyBytes), environment.NewDeploymentHandler(environmentService, maxBodyBytes), github.NewWebhookHandler(webhookStore, githubWebhookSecret, maxBodyBytes), github.NewIntegrationHandlerWithIdempotency(integrationService, maxBodyBytes, oauthConfig.SuccessRedirect, idempotencyStore, snapshotService), automation.NewHandler(automationService, maxBodyBytes), notification.NewHandler(notificationService), customfield.NewHandler(customFieldService, maxBodyBytes), attachment.NewHandler(attachmentService), audit.NewHandler(auditWriter), workitem.NewActivityHandler(workItemService, auditWriter), branchPlanHandler, mcp.NewHTTPHandlerWithAutonomous(workItemService, specService, agentRunService, autonomousService, tenantService, planningService, maxBodyBytes, integrationService), providerAuthHandler, authenticator, developmentAuth, maxBodyBytes, ready, idempotencyStore, tenantService, runnerToken), Ready: ready, Audit: auditWriter, Outbox: outboxWriter, WorkItems: workItemService, Specifications: specService, AgentRuns: agentRunService, Autonomous: autonomousService, Environments: environmentService, Automation: automationService, Notifications: notificationService, CustomFields: customFieldService, Attachments: attachmentService, Tenant: tenantService, Planning: planningService, BranchPlans: branchPlanService, GitHub: integrationService, RepositoryIndex: snapshotService, Authenticator: authenticator, Close: func() error { pool.Close(); return nil }}, nil
 }
 
-func composeHandler(workItems *workitem.Service, specs *specification.Service, workflowService *workflow.Service, authHandler, tenantHandler, planningHandler, boardHandler, agentRunHandler, autonomousHandler, environmentHandler, deploymentHandler, webhookHandler, integrationHandler, automationHandler, notificationHandler, customFieldHandler, attachmentHandler, auditHandler, activityHandler, branchPlanHandler, mcpHandler http.Handler, authenticator identity.Authenticator, developmentAuth bool, maxBodyBytes int64, ready func(context.Context) error, idempotencyStore platformidempotency.Store, projectScopeLookup workitem.ProjectScopeLookup) http.Handler {
+func composeHandler(workItems *workitem.Service, specs *specification.Service, workflowService *workflow.Service, authHandler, tenantHandler, planningHandler, boardHandler, agentRunHandler, autonomousHandler, environmentHandler, deploymentHandler, webhookHandler, integrationHandler, automationHandler, notificationHandler, customFieldHandler, attachmentHandler, auditHandler, activityHandler, branchPlanHandler, mcpHandler, providerAuthHandler http.Handler, authenticator identity.Authenticator, developmentAuth bool, maxBodyBytes int64, ready func(context.Context) error, idempotencyStore platformidempotency.Store, projectScopeLookup workitem.ProjectScopeLookup, runnerSecrets ...string) http.Handler {
 	api := http.NewServeMux()
 	workItemAPI := workitem.NewAPIHandlerWithProjectScopeLookup(workItems, specs, maxBodyBytes, idempotencyStore, projectScopeLookup)
 	api.Handle("/work-items", workItemAPI)
@@ -191,7 +194,7 @@ func composeHandler(workItems *workitem.Service, specs *specification.Service, w
 	api.Handle("/workspaces", tenantHandler)
 	api.Handle("/workspaces/", tenantHandler)
 	api.Handle("/projects", tenantHandler)
-	api.Handle("/projects/", projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler, branchPlanHandler))
+	api.Handle("/projects/", projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler, branchPlanHandler, providerAuthHandler))
 	api.Handle("/sprints", planningHandler)
 	api.Handle("/sprints/", planningHandler)
 	api.Handle("/boards/", boardHandler)
@@ -225,17 +228,29 @@ func composeHandler(workItems *workitem.Service, specs *specification.Service, w
 		httpapi.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 	protected := http.Handler(http.StripPrefix("/api/v1", api))
+	runnerSecret := firstRunnerSecret(runnerSecrets)
 	if developmentAuth {
-		protected = httpapi.WithDevelopmentActor(protected)
+		protected = httpapi.WithDevelopmentActor(protected, runnerSecret)
 	} else {
-		protected = httpapi.WithAuthenticator(protected, authenticator)
+		protected = httpapi.WithAuthenticator(protected, authenticator, runnerSecret)
 	}
 	root.Handle("/api/v1/", protected)
 	return httpapi.WithSecurityHeaders(httpapi.WithRequestID(root))
 }
 
-func projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler, branchPlanHandler http.Handler) http.Handler {
+func firstRunnerSecret(secrets []string) string {
+	if len(secrets) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(secrets[0])
+}
+
+func projectRoutes(tenantHandler, integrationHandler, automationHandler, customFieldHandler, environmentHandler, branchPlanHandler, providerAuthHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/provider-auth") {
+			providerAuthHandler.ServeHTTP(w, r)
+			return
+		}
 		if strings.Contains(r.URL.Path, "/ai-policy") || strings.Contains(r.URL.Path, "/delivery-policy") || strings.Contains(r.URL.Path, "/environments") {
 			environmentHandler.ServeHTTP(w, r)
 			return

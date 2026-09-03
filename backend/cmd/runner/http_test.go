@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,7 +30,26 @@ func TestRunnerHTTPContract(t *testing.T) {
 		}
 	})
 
-	job := runner.Job{ID: "job-1", AutonomousRunID: "autonomous-1", AgentRunID: "agent-1", Provider: "codex", Prompt: "run the regression suite", Workspace: workspace, WorkspaceRoot: root, TimeoutSeconds: 60}
+	t.Run("provider auth requires runner bearer", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/auth", nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("provider auth status is bounded", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/auth", nil)
+		request.Header.Set("Authorization", "Bearer runner-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"provider":"codex"`) || strings.Contains(response.Body.String(), "token") {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
+
+	job := runner.Job{ID: "job-1", AutonomousRunID: "autonomous-1", AgentRunID: "agent-1", Provider: "codex", Prompt: "run the regression suite", Workspace: workspace, WorkspaceRoot: root, TimeoutSeconds: 60, MCPURL: "https://forgeflow.example/api/v1/mcp?project_id=project-1"}
 	body, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
@@ -61,14 +81,28 @@ func TestRunnerHTTPContract(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(string(body)))
 		request.Header.Set("Authorization", "Bearer runner-secret")
 		request.Header.Set("X-Forgeflow-Git-Token", "short-lived-git-token")
+		request.Header.Set("X-Forgeflow-MCP-Token", "short-lived-mcp-token")
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"output":"completed"`) {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
-		if received.ID != job.ID || received.GitToken != "short-lived-git-token" {
+		if received.ID != job.ID || received.MCPURL != job.MCPURL || received.GitToken != "short-lived-git-token" || received.MCPToken != "short-lived-mcp-token" {
 			t.Fatalf("received job = %#v", received)
+		}
+	})
+
+	t.Run("returns execution errors", func(t *testing.T) {
+		executionError := runnerHTTPHandler("runner-secret", func(context.Context, runner.Job) (runner.Result, error) {
+			return runner.Result{}, errors.New("clone repository: access denied")
+		})
+		request := httptest.NewRequest(http.MethodPost, "/jobs", strings.NewReader(string(body)))
+		request.Header.Set("Authorization", "Bearer runner-secret")
+		response := httptest.NewRecorder()
+		executionError.ServeHTTP(response, request)
+		if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), `"error":"clone repository: access denied"`) || !strings.Contains(response.Body.String(), `"exit_code":1`) {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
 	})
 }

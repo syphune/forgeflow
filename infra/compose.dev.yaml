@@ -47,6 +47,8 @@ services:
       FORGEFLOW_GITHUB_APP_CLIENT_ID: ${FORGEFLOW_GITHUB_APP_CLIENT_ID:-}
       FORGEFLOW_GITHUB_APP_CLIENT_SECRET: ${FORGEFLOW_GITHUB_APP_CLIENT_SECRET:-}
       FORGEFLOW_GITHUB_APP_TOKEN_ENCRYPTION_KEY: ${FORGEFLOW_GITHUB_APP_TOKEN_ENCRYPTION_KEY:-}
+      FORGEFLOW_RUNNER_URL: ${FORGEFLOW_RUNNER_URL:-}
+      FORGEFLOW_RUNNER_TOKEN: ${FORGEFLOW_RUNNER_TOKEN:-}
       FORGEFLOW_ATTACHMENTS_DIR: /var/lib/forgeflow/attachments
       FORGEFLOW_ATTACHMENT_STORAGE: ${FORGEFLOW_ATTACHMENT_STORAGE:-local}
       FORGEFLOW_ATTACHMENT_S3_ENDPOINT: ${FORGEFLOW_ATTACHMENT_S3_ENDPOINT:-}
@@ -87,7 +89,7 @@ services:
       - ../.env.local
     environment:
       DATABASE_URL: postgres://forgeflow:forgeflow@postgres:5432/forgeflow?sslmode=disable
-      FORGEFLOW_GITHUB_APP_PRIVATE_KEY_FILE: ""
+      FORGEFLOW_GITHUB_APP_PRIVATE_KEY_FILE: /forgeflow-app.private-key.pem
       FORGEFLOW_RUNNER_URL: ${FORGEFLOW_RUNNER_URL:-}
       FORGEFLOW_RUNNER_TOKEN: ${FORGEFLOW_RUNNER_TOKEN:-}
       FORGEFLOW_RUNNER_WORKSPACE_ROOT: /var/lib/forgeflow/workspaces
@@ -96,7 +98,10 @@ services:
       FORGEFLOW_RUNNER_MEMORY_LIMIT: ${FORGEFLOW_RUNNER_MEMORY_LIMIT:-2g}
       FORGEFLOW_RUNNER_PIDS_LIMIT: ${FORGEFLOW_RUNNER_PIDS_LIMIT:-512}
       FORGEFLOW_RUNNER_NETWORK_MODE: ${FORGEFLOW_RUNNER_NETWORK_MODE:-none}
+      FORGEFLOW_RUNNER_MCP_URL: ${FORGEFLOW_RUNNER_MCP_URL:-http://host.docker.internal:18080/api/v1/mcp}
+      FORGEFLOW_RUNNER_MCP_TOKEN: ${FORGEFLOW_RUNNER_MCP_TOKEN:-}
     volumes:
+      - ${FORGEFLOW_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/forgeflow-app.private-key.pem:ro
       - ${FORGEFLOW_RUNNER_WORKSPACE_HOST_ROOT:-../data/workspaces}:/var/lib/forgeflow/workspaces
     depends_on:
       migrate:
@@ -115,11 +120,14 @@ services:
       FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT: ${FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT:-}
       FORGEFLOW_RUNNER_IMAGE: ${FORGEFLOW_RUNNER_IMAGE:-forgeflow/agent-runner:1.0.0}
       FORGEFLOW_GIT_TOKEN: ${FORGEFLOW_GIT_TOKEN:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      FORGEFLOW_CODEX_HOME: /var/lib/forgeflow/provider-auth/codex
+      FORGEFLOW_CLAUDE_CONFIG_DIR: /var/lib/forgeflow/provider-auth/claude
+      FORGEFLOW_CODEX_AUTH_HOST_PATH: ${FORGEFLOW_CODEX_AUTH_HOST_PATH:-}
+      FORGEFLOW_CLAUDE_CONFIG_HOST_PATH: ${FORGEFLOW_CLAUDE_CONFIG_HOST_PATH:-}
     volumes:
       - ${FORGEFLOW_RUNNER_WORKSPACE_HOST_ROOT:-../data/workspaces}:/var/lib/forgeflow/workspaces
+      - ${FORGEFLOW_CODEX_HOME_HOST_PATH:-../data/provider-auth/codex}:/var/lib/forgeflow/provider-auth/codex
+      - ${FORGEFLOW_CLAUDE_CONFIG_HOST_PATH:-../data/provider-auth/claude}:/var/lib/forgeflow/provider-auth/claude
       - /var/run/docker.sock:/var/run/docker.sock
     group_add:
       - ${DOCKER_GID:-999}

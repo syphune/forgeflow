@@ -50,6 +50,8 @@ type Config struct {
 	RunnerPidsLimit             int
 	RunnerNetworkMode           string
 	RunnerDockerWorkspaceRoot   string
+	RunnerMCPURL                string
+	RunnerMCPToken              string
 }
 
 func Load() (Config, error) {
@@ -67,6 +69,14 @@ func Load() (Config, error) {
 			}
 			privateKey = string(contents)
 		}
+	}
+	runnerMCPURL := strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_MCP_URL"))
+	if runnerMCPURL == "" {
+		runnerMCPURL = strings.TrimSpace(os.Getenv("FORGEFLOW_MCP_URL"))
+	}
+	runnerMCPToken := os.Getenv("FORGEFLOW_RUNNER_MCP_TOKEN")
+	if runnerMCPToken == "" {
+		runnerMCPToken = os.Getenv("FORGEFLOW_MCP_TOKEN")
 	}
 	c := Config{
 		HTTPAddress:                 value("FORGEFLOW_HTTP_ADDRESS", ":8080"),
@@ -109,6 +119,8 @@ func Load() (Config, error) {
 		RunnerPidsLimit:             512,
 		RunnerNetworkMode:           value("FORGEFLOW_RUNNER_NETWORK_MODE", "none"),
 		RunnerDockerWorkspaceRoot:   strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT")),
+		RunnerMCPURL:                strings.TrimRight(runnerMCPURL, "/"),
+		RunnerMCPToken:              runnerMCPToken,
 	}
 	if raw := strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_PIDS_LIMIT")); raw != "" {
 		pids, parseErr := strconv.Atoi(raw)

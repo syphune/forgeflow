@@ -91,6 +91,7 @@ type FullMockState = {
   workflow: typeof workflow;
   policy: Record<string, unknown>;
   deliveryPolicy: Record<string, unknown>;
+  providerAuth: Record<string, unknown>[];
   boardSettings: number;
   nextNumber: number;
 };
@@ -187,6 +188,10 @@ function makeState(): FullMockState {
         CRITICAL: { min_approvals: 2, required_roles: [], require_qa: true, require_rollback_plan: true, require_production_verification: true },
       },
     },
+    providerAuth: [
+      { provider: "codex", status: "authenticated", message: "Codex CLI is authenticated on the server.", models: [{ id: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", is_default: true, default_reasoning_effort: "medium", reasoning_efforts: [{ value: "low", description: "Fast" }, { value: "medium", description: "Balanced" }, { value: "high", description: "Deep" }] }] },
+      { provider: "claude", status: "login_required", message: "Sign in to the server Claude CLI from this screen.", reasoning_efforts: [{ value: "low" }, { value: "medium" }, { value: "high" }, { value: "xhigh" }, { value: "max" }] },
+    ],
     boardSettings: 0,
     nextNumber: 2,
   };
@@ -281,6 +286,14 @@ async function installFullMock(page: Page) {
     else if (path === "/api/v1/projects/proj-1/delivery-policy" && method === "PUT") { state.deliveryPolicy = { ...body, project_id: "proj-1", version: Number(state.deliveryPolicy.version) + 1 }; payload = state.deliveryPolicy; }
     else if (path === "/api/v1/projects/proj-1/ai-policy" && method === "GET") payload = state.policy;
     else if (path === "/api/v1/projects/proj-1/ai-policy" && method === "PUT") { state.policy = { ...body, version: Number(state.policy.version) + 1 }; payload = state.policy; }
+    else if (path === "/api/v1/projects/proj-1/provider-auth" && method === "GET") payload = { items: state.providerAuth };
+    else if (path.match(/^\/api\/v1\/projects\/proj-1\/provider-auth\/(codex|claude)\/(login|switch|logout)$/) && method === "POST") {
+      const [, provider, operation] = path.match(/provider-auth\/(codex|claude)\/(login|switch|logout)$/) ?? [];
+      const nextStatus = operation === "logout" ? "login_required" : "login_pending";
+      const nextMessage = operation === "logout" ? `Sign in to the server ${provider} CLI from this screen.` : "Complete the browser sign-in to authenticate the server CLI.";
+      state.providerAuth = state.providerAuth.map((entry) => entry.provider === provider ? { ...entry, status: nextStatus, message: nextMessage } : entry);
+      payload = state.providerAuth.find((entry) => entry.provider === provider);
+    }
     else if (path === "/api/v1/projects/proj-1/environments" && method === "GET") payload = { items: state.environments };
     else if (path === "/api/v1/projects/proj-1/environments" && method === "POST") { const environment = { ...body, id: "env-2", project_id: "proj-1" }; state.environments.push(environment); payload = environment; status = 201; }
     else if (path === "/api/v1/projects/proj-1/custom-fields" && method === "GET") payload = { items: state.fields };
@@ -560,10 +573,19 @@ test("covers user-controlled AgentRun and autonomous lifecycle", async ({ page }
 
   const autonomous = page.locator('section[aria-labelledby="autonomous-workflow-heading"]');
   await autonomous.getByRole("button", { name: "Bắt đầu autonomous", exact: true }).first().click();
+  const modelSelector = autonomous.getByRole("combobox", { name: "Model (tuỳ chọn)" });
+  await modelSelector.click();
+  await autonomous.getByRole("option", { name: "GPT-5.6-Sol · default", exact: true }).click();
+  const reasoningSelector = autonomous.getByRole("combobox", { name: "Độ suy luận (tuỳ chọn)" });
+  await reasoningSelector.click();
+  await autonomous.getByRole("option", { name: "high — Deep", exact: true }).click();
   await autonomous.getByLabel("Mục tiêu của manager hoặc leader").fill("Run the Astro regression workflow from the user-defined acceptance cases.");
   await autonomous.locator("form").getByRole("button", { name: "Bắt đầu autonomous", exact: true }).click();
   await expect(page.getByText("Đã bắt đầu workflow autonomous.")).toBeVisible();
   const createdAutonomous = autonomous.locator(".app-v2-run-card").filter({ hasText: "Run the Astro regression workflow" }).first();
+  await expect(createdAutonomous.locator(".app-v2-run-progress")).toBeVisible();
+  await expect(createdAutonomous).toContainText("Model: gpt-5.6-sol");
+  await expect(createdAutonomous).toContainText("Độ suy luận: high");
   await createdAutonomous.getByRole("button", { name: "Hủy", exact: true }).click();
   await expect(page.getByText("Đã hủy workflow autonomous.")).toBeVisible();
 
@@ -644,6 +666,12 @@ test("covers planning, repository, settings, inbox and developer mutations", asy
   await page.goto(`${base}/settings/autonomous`);
   await page.getByRole("button", { name: "Lưu policy AI" }).click();
   await expect(page.getByText("Đã lưu policy AI autonomous.")).toBeVisible();
+  const codexAuth = page.locator(".app-v2-provider-auth-row").filter({ hasText: "Codex" });
+  await codexAuth.getByRole("button", { name: "Đổi tài khoản", exact: true }).click();
+  await expect(codexAuth.getByText("Đang chờ đăng nhập")).toBeVisible();
+  const claudeAuth = page.locator(".app-v2-provider-auth-row").filter({ hasText: "Claude" });
+  await claudeAuth.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+  await expect(claudeAuth.getByText("Đang chờ đăng nhập")).toBeVisible();
   await page.getByLabel("Key môi trường").fill("production");
   await page.getByLabel("Tên hiển thị").fill("Production");
   await page.getByRole("button", { name: "Thêm môi trường" }).click();
@@ -703,6 +731,8 @@ test("covers planning, repository, settings, inbox and developer mutations", asy
 
   expect(state.calls.has("POST /api/v1/sprints")).toBeTruthy();
   expect(state.calls.has("POST /api/v1/projects/proj-1/environments")).toBeTruthy();
+  expect(state.calls.has("POST /api/v1/projects/proj-1/provider-auth/codex/switch")).toBeTruthy();
+  expect(state.calls.has("POST /api/v1/projects/proj-1/provider-auth/claude/login")).toBeTruthy();
   expect(state.calls.has("POST /api/v1/projects/proj-1/custom-fields")).toBeTruthy();
   expect(state.calls.has("POST /api/v1/projects/proj-1/automation-rules")).toBeTruthy();
   expect(state.calls.has("POST /api/v1/organizations/current/members")).toBeTruthy();

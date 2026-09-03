@@ -77,6 +77,20 @@ func TestTransitionAndTenantScope(t *testing.T) {
 	}
 }
 
+func TestCreateNormalizesInvalidUTF8Text(t *testing.T) {
+	now := func() time.Time { return time.Unix(100, 0).UTC() }
+	specService := specification.NewService(specification.NewMemoryStore(), now)
+	service := NewService(NewMemoryRepository(now), specService, workflow.NewService(workflow.Default()), audit.NewMemoryWriter(), outbox.NewMemoryWriter(), now)
+	actor := identity.Actor{Type: "human", ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{"*": true}}
+	item, err := service.Create(context.Background(), Scope{OrganizationID: "org-1", ProjectID: "project-1"}, actor, CreateInput{Type: Task, Title: string([]byte{'T', 0xe1}), Description: string([]byte{'D', 0xe1})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Title != "T�" || item.Description != "D�" {
+		t.Fatalf("normalized work item = %#v", item)
+	}
+}
+
 func TestWorkItemSpecificationStateFollowsConfiguredWorkflow(t *testing.T) {
 	ctx := context.Background()
 	now := func() time.Time { return time.Unix(100, 0).UTC() }

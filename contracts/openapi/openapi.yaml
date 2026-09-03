@@ -1686,6 +1686,60 @@ paths:
           description: Project autonomous policy updated
           content:
             application/json: { schema: { $ref: "#/components/schemas/AutonomousPolicy" } }
+  /projects/{id}/provider-auth:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+    get:
+      operationId: listProjectProviderAuth
+      summary: Show server-side Codex and Claude CLI authentication status
+      responses:
+        "200":
+          description: Provider authentication status
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ProviderAuthList" } }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+  /projects/{id}/provider-auth/{provider}/login:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+      - { $ref: "#/components/parameters/ProviderPath" }
+    post:
+      operationId: loginProjectProvider
+      summary: Start browser/device authentication for a server-side provider CLI
+      responses:
+        "200":
+          description: Login flow status
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ProviderAuthStatus" } }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /projects/{id}/provider-auth/{provider}/switch:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+      - { $ref: "#/components/parameters/ProviderPath" }
+    post:
+      operationId: switchProjectProvider
+      summary: Sign out and start a new browser/device authentication flow
+      responses:
+        "200":
+          description: Login flow status
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ProviderAuthStatus" } }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /projects/{id}/provider-auth/{provider}/logout:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectPathID" }
+      - { $ref: "#/components/parameters/ProviderPath" }
+    post:
+      operationId: logoutProjectProvider
+      summary: Sign out the selected server-side provider CLI
+      responses:
+        "200":
+          description: Provider authentication status
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ProviderAuthStatus" } }
+        "403": { $ref: "#/components/responses/ForbiddenError" }
+        "422": { $ref: "#/components/responses/ValidationError" }
   /projects/{id}/delivery-policy:
     parameters:
       - { $ref: "#/components/parameters/ProjectPathID" }
@@ -2515,6 +2569,11 @@ components:
       schema:
         type: string
         format: uuid
+    ProviderPath:
+      name: provider
+      in: path
+      required: true
+      schema: { type: string, enum: [codex, claude] }
     ProjectIDHeader:
       name: X-Project-ID
       in: header
@@ -3509,6 +3568,43 @@ components:
         workspace_id: { type: string, format: uuid }
         project_id: { type: string, format: uuid }
         capabilities: { type: array, items: { type: string } }
+    ProviderReasoningEffort:
+      type: object
+      required: [value]
+      properties:
+        value: { type: string, maxLength: 64 }
+        description: { type: string, maxLength: 256 }
+    ProviderModel:
+      type: object
+      required: [id, display_name, is_default, reasoning_efforts]
+      properties:
+        id: { type: string, maxLength: 120 }
+        display_name: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 1000 }
+        is_default: { type: boolean }
+        default_reasoning_effort: { type: string, maxLength: 64 }
+        reasoning_efforts:
+          { type: array, maxItems: 32, items: { $ref: "#/components/schemas/ProviderReasoningEffort" } }
+    ProviderAuthStatus:
+      type: object
+      required: [provider, status, message]
+      properties:
+        provider: { type: string, enum: [codex, claude] }
+        status: { type: string, enum: [authenticated, login_required, login_pending, unavailable] }
+        message: { type: string }
+        verification_uri: { type: string, format: uri }
+        user_code: { type: string }
+        expires_at: { type: string, format: date-time, nullable: true }
+        models:
+          { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ProviderModel" } }
+        reasoning_efforts:
+          { type: array, maxItems: 32, items: { $ref: "#/components/schemas/ProviderReasoningEffort" } }
+        model_catalog_message: { type: string, maxLength: 400 }
+    ProviderAuthList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ProviderAuthStatus" } }
     CreateTokenRequest:
       type: object
       required: [name]
@@ -3578,6 +3674,7 @@ components:
         agent_provider: { type: string }
         agent_name: { type: string }
         model: { type: string }
+        reasoning_effort: { type: string, maxLength: 64 }
         base_sha: { type: string }
         branch: { type: string }
         execution_inputs: { $ref: "#/components/schemas/AgentRunExecutionInputs" }
@@ -3607,6 +3704,7 @@ components:
         agent_provider: { type: string }
         agent_name: { type: string }
         model: { type: string }
+        reasoning_effort: { type: string, maxLength: 64 }
         base_sha: { type: string }
         branch: { type: string }
         execution_inputs: { $ref: "#/components/schemas/AgentRunExecutionInputs" }
@@ -3680,6 +3778,7 @@ components:
         agent_provider: { type: string, enum: [codex, claude] }
         agent_name: { type: string, maxLength: 120 }
         model: { type: string, maxLength: 120 }
+        reasoning_effort: { type: string, maxLength: 64 }
         target_environment: { type: string, maxLength: 120 }
         test_case_positions: { type: array, items: { type: integer, minimum: 1 }, maxItems: 200 }
         policy: { $ref: "#/components/schemas/AutonomousPolicy" }
@@ -3698,6 +3797,7 @@ components:
         agent_provider: { type: string }
         agent_name: { type: string }
         model: { type: string }
+        reasoning_effort: { type: string, maxLength: 64 }
         target_environment: { type: string }
         policy: { $ref: "#/components/schemas/AutonomousPolicy" }
         status:

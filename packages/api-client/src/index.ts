@@ -61,6 +61,8 @@ export type AutonomousStartRequest = components["schemas"]["AutonomousStartReque
 export type AutonomousRetryRequest = components["schemas"]["AutonomousRetryRequest"];
 export type AutonomousFeedbackRequest = components["schemas"]["AutonomousFeedbackRequest"];
 export type AutonomousFeedback = components["schemas"]["AutonomousFeedback"];
+export type ProviderAuthStatus = components["schemas"]["ProviderAuthStatus"];
+export type ProviderAuthList = components["schemas"]["ProviderAuthList"];
 export type Environment = components["schemas"]["Environment"];
 export type CreateEnvironmentRequest = components["schemas"]["CreateEnvironmentRequest"];
 export type DeploymentRequest = components["schemas"]["DeploymentRequest"];
@@ -532,6 +534,22 @@ export class APIClient {
 
   updateProjectAIPolicy(projectID: string, input: AutonomousPolicy): Promise<AutonomousPolicy> {
     return this.request<AutonomousPolicy>(`/projects/${encodeURIComponent(projectID)}/ai-policy`, { method: "PUT", projectID, body: input });
+  }
+
+  getProjectProviderAuth(projectID: string): Promise<ProviderAuthList> {
+    return this.request<ProviderAuthList>(`/projects/${encodeURIComponent(projectID)}/provider-auth`, { projectID });
+  }
+
+  loginProjectProvider(projectID: string, provider: "codex" | "claude"): Promise<ProviderAuthStatus> {
+    return this.request<ProviderAuthStatus>(`/projects/${encodeURIComponent(projectID)}/provider-auth/${provider}/login`, { method: "POST", projectID });
+  }
+
+  switchProjectProvider(projectID: string, provider: "codex" | "claude"): Promise<ProviderAuthStatus> {
+    return this.request<ProviderAuthStatus>(`/projects/${encodeURIComponent(projectID)}/provider-auth/${provider}/switch`, { method: "POST", projectID });
+  }
+
+  logoutProjectProvider(projectID: string, provider: "codex" | "claude"): Promise<ProviderAuthStatus> {
+    return this.request<ProviderAuthStatus>(`/projects/${encodeURIComponent(projectID)}/provider-auth/${provider}/logout`, { method: "POST", projectID });
   }
 
   listProjectEnvironments(projectID: string): Promise<{ items: Environment[] }> {

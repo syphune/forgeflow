@@ -95,9 +95,9 @@ func (s *PostgresStore) Delete(ctx context.Context, organizationID, projectID, i
 func (s *PostgresStore) Matching(ctx context.Context, event outbox.Event) ([]Rule, error) {
 	projectID := eventProjectID(event)
 	rows, err := platformdb.ExecutorFrom(ctx, s.pool).Query(ctx, ruleSelect+` WHERE organization_id=$1 AND enabled AND event_type=$2 AND (
-		(project_id=$5 AND $5<>'' AND $4 IN ('work_item','repository','github'))
-		OR (project_id=(SELECT project_id FROM work_items WHERE organization_id=$1 AND id=$3) AND $4='work_item')
-		OR (project_id IN (SELECT project_id FROM repository_links WHERE organization_id=$1 AND repository_id=$3) AND $4='github' AND $5='')
+		(project_id=NULLIF($5,'')::uuid AND $5<>'' AND $4 IN ('work_item','repository','github'))
+		OR (project_id=(SELECT project_id FROM work_items WHERE organization_id=$1 AND id=NULLIF($3,'')::uuid) AND $4='work_item')
+		OR (project_id IN (SELECT project_id FROM repository_links WHERE organization_id=$1 AND repository_id=NULLIF($3,'')::uuid) AND $4='github' AND $5='')
 		OR event_type='github.installation.connected'
 	) ORDER BY created_at,id`, event.OrganizationID, event.EventType, event.AggregateID, event.AggregateType, projectID)
 	if err != nil {

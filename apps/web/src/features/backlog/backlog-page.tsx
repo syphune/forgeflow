@@ -359,7 +359,7 @@ function WorkItemRow({ item, href, onOpen }: { item: WorkItem; href: string; onO
     onOpen(item.id);
   }
 
-  return <Link className="app-v2-list-row" data-work-item-id={item.id} href={href} onClick={handleClick}><div><WorkItemMeta item={item} /><strong>{item.title}</strong></div><span className={`app-v2-status-pill is-${uiTone(item.status)}`}>{label(item.status)} <span aria-hidden="true">→</span></span></Link>;
+  return <Link className="app-v2-list-row" data-work-item-id={item.id} href={href} onClick={handleClick}><div className="app-v2-list-row-copy"><WorkItemMeta item={item} /><strong>{item.title}</strong><p>{item.description || t("work.no-context")}</p></div><span className={`app-v2-status-pill is-${uiTone(item.status)}`}>{label(item.status)} <span aria-hidden="true">→</span></span></Link>;
 }
 
 type CardProps = {

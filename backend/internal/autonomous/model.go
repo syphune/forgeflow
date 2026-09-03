@@ -64,15 +64,19 @@ type Policy struct {
 
 func DefaultPolicy() Policy {
 	return Policy{
-		Enabled:          true,
-		Providers:        []string{"codex", "claude"},
-		Runtime:          "server",
-		MaxAttempts:      3,
-		TimeoutSeconds:   3600,
-		AutoRetry:        true,
-		AutoCreatePR:     true,
-		TestScope:        "unresolved_only",
-		MCPPermissions:   []string{"work_item.get_context", "agent_run.get", "agent_run.record_test_results", "agent_run.attach_result"},
+		Enabled:        true,
+		Providers:      []string{"codex", "claude"},
+		Runtime:        "server",
+		MaxAttempts:    3,
+		TimeoutSeconds: 3600,
+		AutoRetry:      true,
+		AutoCreatePR:   true,
+		TestScope:      "unresolved_only",
+		MCPPermissions: []string{
+			"work_item.get", "specification.get", "work_item.get_context", "agent_run.get", "agent_run.record_test_results", "agent_run.attach_result",
+			"repository.get", "repository.get_structure", "repository.search_code", "repository.get_file",
+			"repository.get_symbol", "repository.related_files", "repository.related_commits", "repository.related_pull_requests",
+		},
 		ExecutionProfile: "default",
 	}
 }
@@ -121,6 +125,7 @@ type Run struct {
 	AgentProvider       string     `json:"agent_provider"`
 	AgentName           string     `json:"agent_name"`
 	Model               string     `json:"model,omitempty"`
+	ReasoningEffort     string     `json:"reasoning_effort,omitempty"`
 	TargetEnvironment   string     `json:"target_environment,omitempty"`
 	Policy              Policy     `json:"policy"`
 	Status              Status     `json:"status"`
@@ -151,6 +156,7 @@ type StartInput struct {
 	AgentProvider     string
 	AgentName         string
 	Model             string
+	ReasoningEffort   string
 	TargetEnvironment string
 	TestCasePositions []int
 	Policy            Policy

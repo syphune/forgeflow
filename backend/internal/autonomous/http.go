@@ -72,6 +72,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		AgentProvider     string `json:"agent_provider"`
 		AgentName         string `json:"agent_name"`
 		Model             string `json:"model"`
+		ReasoningEffort   string `json:"reasoning_effort"`
 		BaseSHA           string `json:"base_sha"`
 		Branch            string `json:"branch"`
 		TargetEnvironment string `json:"target_environment"`
@@ -86,7 +87,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		handleError(w, r, apperr.New(apperr.CodeForbidden, http.StatusForbidden, "project_id does not match the scoped project", nil))
 		return
 	}
-	run, err := h.service.Start(r.Context(), actor, StartInput{ProjectID: projectID, WorkItemID: input.WorkItemID, WorkItemType: input.WorkItemType, Title: input.Title, RepositoryID: input.RepositoryID, Objective: input.Objective, AgentProvider: input.AgentProvider, AgentName: input.AgentName, Model: input.Model, BaseSHA: input.BaseSHA, Branch: input.Branch, TargetEnvironment: input.TargetEnvironment, TestCasePositions: input.TestCasePositions, Policy: input.Policy})
+	run, err := h.service.Start(r.Context(), actor, StartInput{ProjectID: projectID, WorkItemID: input.WorkItemID, WorkItemType: input.WorkItemType, Title: input.Title, RepositoryID: input.RepositoryID, Objective: input.Objective, AgentProvider: input.AgentProvider, AgentName: input.AgentName, Model: input.Model, ReasoningEffort: input.ReasoningEffort, BaseSHA: input.BaseSHA, Branch: input.Branch, TargetEnvironment: input.TargetEnvironment, TestCasePositions: input.TestCasePositions, Policy: input.Policy})
 	if err != nil {
 		handleError(w, r, err)
 		return

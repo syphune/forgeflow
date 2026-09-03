@@ -53,8 +53,13 @@ func From(err error) *Error {
 		return appErr
 	}
 	var sqlStateErr interface{ SQLState() string }
-	if errors.As(err, &sqlStateErr) && sqlStateErr.SQLState() == "22P02" {
-		return New(CodeInvalidArgument, 422, "request contains an invalid identifier", nil)
+	if errors.As(err, &sqlStateErr) {
+		switch sqlStateErr.SQLState() {
+		case "22P02":
+			return New(CodeInvalidArgument, 422, "request contains an invalid identifier", nil)
+		case "22021":
+			return New(CodeInvalidArgument, 422, "request contains invalid UTF-8 text", nil)
+		}
 	}
 	return Wrap(CodeInternal, 500, "internal server error", err)
 }

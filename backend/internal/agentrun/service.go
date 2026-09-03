@@ -61,15 +61,49 @@ func NewService(store Store, workItems *workitem.Service, options ...Options) *S
 }
 
 func (s *Service) Create(ctx context.Context, actor identity.Actor, input CreateInput) (Run, error) {
+	return s.create(ctx, actor, input, false)
+}
+
+// CreateAutonomousIntake creates the read-only AgentRun used to turn raw
+// intake text into an unverified specification draft. It intentionally skips
+// the READY gate; the normal Create path keeps that gate for code changes.
+func (s *Service) CreateAutonomousIntake(ctx context.Context, actor identity.Actor, input CreateInput) (Run, error) {
+	return s.create(ctx, actor, input, true)
+}
+
+func (s *Service) create(ctx context.Context, actor identity.Actor, input CreateInput, intake bool) (Run, error) {
 	if err := require(actor, identity.CapabilityAgentExecute); err != nil {
 		return Run{}, err
+	}
+	input.Model = strings.TrimSpace(input.Model)
+	input.ReasoningEffort = strings.TrimSpace(input.ReasoningEffort)
+	if len([]rune(input.Model)) > 120 || len([]rune(input.ReasoningEffort)) > 64 || strings.ContainsAny(input.Model+input.ReasoningEffort, "\x00\r\n") {
+		return Run{}, apperr.New(apperr.CodeInvalidArgument, 422, "model or reasoning effort is invalid or too long", nil)
 	}
 	if strings.TrimSpace(input.ProjectID) == "" || strings.TrimSpace(input.WorkItemID) == "" || strings.TrimSpace(input.RepositoryID) == "" || strings.TrimSpace(input.AgentProvider) == "" || strings.TrimSpace(input.AgentName) == "" {
 		return Run{}, apperr.New(apperr.CodeInvalidArgument, 422, "project_id, work_item_id, repository_id, agent_provider and agent_name are required", nil)
 	}
-	specificationVersion, err := s.validateReadyWorkItem(ctx, actor, input.ProjectID, input.WorkItemID, input.RepositoryID, len(input.ExecutionInputs.TestCasePositions) > 0 || autonomousExecution(input.ExecutionPolicy))
-	if err != nil {
-		return Run{}, err
+	var specificationVersion int
+	var err error
+	if intake {
+		if !autonomousIntakeExecution(input.ExecutionPolicy) {
+			return Run{}, apperr.New(apperr.CodeForbidden, 403, "autonomous intake AgentRun is not authorized by policy", nil)
+		}
+		if s.workItems != nil {
+			item, itemErr := s.workItems.Get(ctx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: input.ProjectID}, actor, input.WorkItemID)
+			if itemErr != nil {
+				return Run{}, itemErr
+			}
+			linkedRepositoryID := s.workItems.RepositoryIDFor(ctx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: input.ProjectID}, item)
+			if linkedRepositoryID == "" || linkedRepositoryID != strings.TrimSpace(input.RepositoryID) {
+				return Run{}, apperr.New(apperr.CodeConflict, 409, "the intake AgentRun repository must match the work item repository", map[string]any{"work_item_repository_id": linkedRepositoryID})
+			}
+		}
+	} else {
+		specificationVersion, err = s.validateReadyWorkItem(ctx, actor, input.ProjectID, input.WorkItemID, input.RepositoryID, len(input.ExecutionInputs.TestCasePositions) > 0 || autonomousExecution(input.ExecutionPolicy))
+		if err != nil {
+			return Run{}, err
+		}
 	}
 	input.ExecutionInputs = normalizeExecutionInputs(input.ExecutionInputs)
 	if specificationVersion > 0 {
@@ -203,12 +237,14 @@ func (s *Service) StartAutonomousForOrganization(ctx context.Context, organizati
 	actor := identity.Actor{Type: "system", ID: "autonomous-orchestrator", Source: "worker", OrganizationID: organizationID, Capabilities: map[string]bool{"*": true}}
 	var result Run
 	err = s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
-		specificationVersion, validationErr := s.validateReadyWorkItem(txCtx, actor, run.ProjectID, run.WorkItemID, run.RepositoryID, len(run.ExecutionInputs.TestCasePositions) > 0 || autonomousExecution(run.ExecutionPolicy))
-		if validationErr != nil {
-			return validationErr
-		}
-		if run.ExecutionInputs.SpecificationVersion > 0 && specificationVersion > 0 && run.ExecutionInputs.SpecificationVersion != specificationVersion {
-			return apperr.New(apperr.CodeStaleSpecification, 409, "the autonomous AgentRun specification is stale", map[string]any{"approved_version": run.ExecutionInputs.SpecificationVersion, "current_version": specificationVersion})
+		if !autonomousIntakeExecution(run.ExecutionPolicy) {
+			specificationVersion, validationErr := s.validateReadyWorkItem(txCtx, actor, run.ProjectID, run.WorkItemID, run.RepositoryID, len(run.ExecutionInputs.TestCasePositions) > 0 || autonomousExecution(run.ExecutionPolicy))
+			if validationErr != nil {
+				return validationErr
+			}
+			if run.ExecutionInputs.SpecificationVersion > 0 && specificationVersion > 0 && run.ExecutionInputs.SpecificationVersion != specificationVersion {
+				return apperr.New(apperr.CodeStaleSpecification, 409, "the autonomous AgentRun specification is stale", map[string]any{"approved_version": run.ExecutionInputs.SpecificationVersion, "current_version": specificationVersion})
+			}
 		}
 		if err := s.validateApprovalFingerprint(run); err != nil {
 			return err
@@ -234,9 +270,6 @@ func (s *Service) Heartbeat(ctx context.Context, actor identity.Actor, projectID
 		return Run{}, err
 	}
 	if err := requireProjectID(projectID); err != nil {
-		return Run{}, err
-	}
-	if _, _, _, err := s.store.Get(ctx, actor.OrganizationID, projectID, id); err != nil {
 		return Run{}, err
 	}
 	return s.store.Heartbeat(ctx, actor.OrganizationID, id, s.now().UTC())
@@ -296,7 +329,7 @@ func (s *Service) ReconcileStale(ctx context.Context) ([]Run, error) {
 		if err := s.record(ctx, actor, "interrupt", run.ID, nil, run); err != nil {
 			return nil, err
 		}
-		if err := s.emit(ctx, run.OrganizationID, run.ID, "agent_run.interrupted", map[string]any{"reason": run.InterruptionReason}); err != nil {
+		if err := s.emit(ctx, run.OrganizationID, run.ID, "agent_run.interrupted", map[string]any{"project_id": run.ProjectID, "reason": run.InterruptionReason}); err != nil {
 			return nil, err
 		}
 	}
@@ -678,7 +711,7 @@ func (s *Service) validateReadyWorkItem(ctx context.Context, actor identity.Acto
 }
 
 func (s *Service) validateApprovalFingerprint(run Run) error {
-	if run.ApprovalFingerprintVersion != ApprovalFingerprintVersion || strings.TrimSpace(run.ApprovalFingerprint) == "" {
+	if (run.ApprovalFingerprintVersion != ApprovalFingerprintVersion && run.ApprovalFingerprintVersion != legacyApprovalFingerprintVersion) || strings.TrimSpace(run.ApprovalFingerprint) == "" {
 		return apperr.New(apperr.CodeConflict, 409, "AgentRun approval fingerprint is missing or unsupported", map[string]any{"fingerprint_version": run.ApprovalFingerprintVersion})
 	}
 	fingerprint, err := fingerprintForRun(run)
@@ -755,4 +788,9 @@ func requireProjectID(projectID string) error {
 func autonomousExecution(policy map[string]any) bool {
 	value, ok := policy["autonomous"].(bool)
 	return ok && value
+}
+
+func autonomousIntakeExecution(policy map[string]any) bool {
+	value, ok := policy["mode"].(string)
+	return ok && strings.EqualFold(strings.TrimSpace(value), "autonomous-intake")
 }

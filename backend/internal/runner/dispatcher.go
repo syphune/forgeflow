@@ -21,6 +21,8 @@ type HTTPDispatcher struct {
 	Client  *http.Client
 }
 
+const maxRunnerResponseBytes = maxOutputBytes*8 + 64*1024
+
 func (d HTTPDispatcher) Dispatch(ctx context.Context, job Job) (Result, error) {
 	if err := job.Validate(); err != nil {
 		return Result{}, err
@@ -45,15 +47,21 @@ func (d HTTPDispatcher) Dispatch(ctx context.Context, job Job) (Result, error) {
 	if strings.TrimSpace(job.GitToken) != "" {
 		request.Header.Set("X-Forgeflow-Git-Token", job.GitToken)
 	}
+	if strings.TrimSpace(job.MCPToken) != "" {
+		request.Header.Set("X-Forgeflow-MCP-Token", job.MCPToken)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
 		return Result{}, fmt.Errorf("dispatch runner job: %w", err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxOutputBytes+64*1024))
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRunnerResponseBytes+1))
 	if err != nil {
 		return Result{}, fmt.Errorf("read runner response: %w", err)
+	}
+	if len(body) > maxRunnerResponseBytes {
+		return Result{}, fmt.Errorf("runner response exceeds %d bytes", maxRunnerResponseBytes)
 	}
 	var result Result
 	if err := json.Unmarshal(body, &result); err != nil {

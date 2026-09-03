@@ -32,10 +32,14 @@ func main() {
 		logger.Error("invalid runner job", "error", err)
 		os.Exit(2)
 	}
+	job.MCPToken = strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_MCP_TOKEN"))
+	if job.MCPToken == "" {
+		job.MCPToken = strings.TrimSpace(os.Getenv("FORGEFLOW_MCP_TOKEN"))
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	encoder := json.NewEncoder(os.Stdout)
-	executor := runner.Executor{UseDocker: true, DockerWorkspaceRoot: strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT"))}
+	executor := runner.Executor{UseDocker: true, DockerWorkspaceRoot: strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT")), CodexAuthHostPath: strings.TrimSpace(os.Getenv("FORGEFLOW_CODEX_AUTH_HOST_PATH")), ClaudeAuthHostPath: strings.TrimSpace(os.Getenv("FORGEFLOW_CLAUDE_CONFIG_HOST_PATH"))}
 	_, err := executor.Execute(ctx, job, func(event runner.Event) error {
 		return encoder.Encode(event)
 	})
@@ -50,7 +54,9 @@ func serveHTTP(address, token string, logger *slog.Logger) {
 		logger.Error("FORGEFLOW_RUNNER_TOKEN is required for HTTP runner mode")
 		os.Exit(2)
 	}
-	handler := runnerHTTPHandler(token, nil)
+	authManager := runner.NewAuthManager(strings.TrimSpace(os.Getenv("FORGEFLOW_CODEX_HOME")), strings.TrimSpace(os.Getenv("FORGEFLOW_CLAUDE_CONFIG_DIR")))
+	defer authManager.Close()
+	handler := runnerHTTPHandlerWithAuth(token, nil, authManager)
 	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 24 * time.Hour}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,9 +74,14 @@ func serveHTTP(address, token string, logger *slog.Logger) {
 }
 
 func runnerHTTPHandler(token string, execute func(context.Context, runner.Job) (runner.Result, error)) http.Handler {
+	authManager := runner.NewAuthManager(strings.TrimSpace(os.Getenv("FORGEFLOW_CODEX_HOME")), strings.TrimSpace(os.Getenv("FORGEFLOW_CLAUDE_CONFIG_DIR")))
+	return runnerHTTPHandlerWithAuth(token, execute, authManager)
+}
+
+func runnerHTTPHandlerWithAuth(token string, execute func(context.Context, runner.Job) (runner.Result, error), authenticator runner.ProviderAuthenticator) http.Handler {
 	if execute == nil {
 		execute = func(ctx context.Context, job runner.Job) (runner.Result, error) {
-			return (runner.Executor{UseDocker: true, DockerWorkspaceRoot: strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT"))}).Execute(ctx, job, nil)
+			return (runner.Executor{UseDocker: true, DockerWorkspaceRoot: strings.TrimSpace(os.Getenv("FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT")), CodexAuthHostPath: strings.TrimSpace(os.Getenv("FORGEFLOW_CODEX_AUTH_HOST_PATH")), ClaudeAuthHostPath: strings.TrimSpace(os.Getenv("FORGEFLOW_CLAUDE_CONFIG_HOST_PATH"))}).Execute(ctx, job, nil)
 		}
 	}
 	mux := http.NewServeMux()
@@ -90,16 +101,81 @@ func runnerHTTPHandler(token string, execute func(context.Context, runner.Job) (
 			return
 		}
 		job.GitToken = strings.TrimSpace(r.Header.Get("X-Forgeflow-Git-Token"))
+		job.MCPToken = strings.TrimSpace(r.Header.Get("X-Forgeflow-MCP-Token"))
 		result, err := execute(r.Context(), job)
 		status := http.StatusOK
 		if err != nil {
+			if strings.TrimSpace(result.Error) == "" {
+				result.Error = err.Error()
+			}
+			if result.ExitCode == 0 {
+				result.ExitCode = 1
+			}
 			status = http.StatusUnprocessableEntity
 		}
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(result)
 	})
+	authenticated := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !authorizedRunnerRequest(r, token) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if authenticator == nil {
+				http.Error(w, "provider authentication is unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			next(w, r)
+		}
+	}
+	mux.HandleFunc("GET /auth", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		items, err := authenticator.List(r.Context())
+		if err != nil {
+			http.Error(w, "provider authentication request failed", http.StatusServiceUnavailable)
+			return
+		}
+		writeProviderAuthJSON(w, runner.AuthList{Items: items})
+	}))
+	mux.HandleFunc("GET /auth/{provider}", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		status, err := authenticator.Status(r.Context(), r.PathValue("provider"))
+		if err != nil {
+			http.Error(w, "provider authentication request failed", http.StatusUnprocessableEntity)
+			return
+		}
+		writeProviderAuthJSON(w, status)
+	}))
+	mux.HandleFunc("POST /auth/{provider}/login", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		status, err := authenticator.Login(r.Context(), r.PathValue("provider"), false)
+		if err != nil {
+			http.Error(w, "provider authentication request failed", http.StatusUnprocessableEntity)
+			return
+		}
+		writeProviderAuthJSON(w, status)
+	}))
+	mux.HandleFunc("POST /auth/{provider}/switch", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		status, err := authenticator.Login(r.Context(), r.PathValue("provider"), true)
+		if err != nil {
+			http.Error(w, "provider authentication request failed", http.StatusUnprocessableEntity)
+			return
+		}
+		writeProviderAuthJSON(w, status)
+	}))
+	mux.HandleFunc("POST /auth/{provider}/logout", authenticated(func(w http.ResponseWriter, r *http.Request) {
+		status, err := authenticator.Logout(r.Context(), r.PathValue("provider"))
+		if err != nil {
+			http.Error(w, "provider authentication request failed", http.StatusUnprocessableEntity)
+			return
+		}
+		writeProviderAuthJSON(w, status)
+	}))
 	return mux
+}
+
+func writeProviderAuthJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("content-type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func authorizedRunnerRequest(r *http.Request, expected string) bool {

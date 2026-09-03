@@ -33,7 +33,7 @@ func main() {
 			Endpoint: cfg.AttachmentS3Endpoint, AccessKey: cfg.AttachmentS3AccessKey,
 			SecretKey: cfg.AttachmentS3SecretKey, Region: cfg.AttachmentS3Region,
 			Bucket: cfg.AttachmentS3Bucket, Prefix: cfg.AttachmentS3Prefix, Secure: cfg.AttachmentS3Secure,
-		}, githubintegration.AppConfig{
+		}, cfg.RunnerURL, cfg.RunnerToken, githubintegration.AppConfig{
 			ID: cfg.GitHubAppID, Slug: cfg.GitHubAppSlug, PrivateKey: cfg.GitHubAppPrivateKey,
 			CallbackURL: cfg.GitHubAppCallbackURL, WebBaseURL: cfg.WebBaseURL,
 			ClientID: cfg.GitHubAppClientID, ClientSecret: cfg.GitHubAppClientSecret,

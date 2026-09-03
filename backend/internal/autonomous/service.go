@@ -183,7 +183,7 @@ func (s *Service) Start(ctx context.Context, actor identity.Actor, input StartIn
 		return Run{}, err
 	}
 	if !readiness.Ready {
-		return s.updateState(ctx, actor, run, StateUpdate{Status: StatusWaitingSpecReview, Phase: PhaseSpecification, Gate: GateSpecification, Attempt: run.Attempt, UnresolvedPositions: input.TestCasePositions, LastError: strings.Join(readiness.Missing, ", ")})
+		return s.startIntakeAttempt(ctx, actor, run, false)
 	}
 	return s.startAttempt(ctx, actor, run, false)
 }
@@ -221,6 +221,9 @@ func (s *Service) Resume(ctx context.Context, actor identity.Actor, projectID, i
 	if run.Status != StatusWaitingSpecReview && run.Status != StatusPaused && run.Status != StatusFailed && run.Status != StatusWaitingTestFeedback {
 		return Run{}, apperr.New(apperr.CodeConflict, 409, "autonomous run is not waiting for a resumable action", map[string]any{"status": run.Status})
 	}
+	if needsIntake(run) {
+		return s.startIntakeAttempt(ctx, actor, run, true)
+	}
 	item, err := s.workItems.Get(ctx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: projectID}, actor, run.WorkItemID)
 	if err != nil {
 		return Run{}, err
@@ -245,6 +248,9 @@ func (s *Service) Retry(ctx context.Context, actor identity.Actor, projectID, id
 	}
 	if run.Attempt >= run.MaxAttempts {
 		return Run{}, apperr.New(apperr.CodeConflict, 409, "autonomous retry limit has been reached", map[string]any{"max_attempts": run.MaxAttempts})
+	}
+	if needsIntake(run) {
+		return s.startIntakeAttempt(ctx, actor, run, true)
 	}
 	if strings.TrimSpace(input.Feedback) != "" {
 		if _, err := s.AddFeedback(ctx, actor, projectID, id, FeedbackInput{Source: actor.Type, Note: input.Feedback, TestCasePositions: input.TestCasePositions}); err != nil {
@@ -365,14 +371,27 @@ func (s *Service) HandleAgentRunResult(ctx context.Context, actor identity.Actor
 	if err != nil {
 		return Run{}, err
 	}
+	if run.Phase == PhaseIntake {
+		if strings.TrimSpace(result.Error) != "" {
+			return s.failIntake(ctx, actor, projectID, id, run, result.Error)
+		}
+		if err := s.applyIntakeResult(ctx, actor, run, result); err != nil {
+			return s.failIntake(ctx, actor, projectID, id, run, intakeFailureMessage(err))
+		}
+		return s.updateState(ctx, actor, run, StateUpdate{Status: StatusWaitingSpecReview, Phase: PhaseSpecification, Gate: GateSpecification, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: ""})
+	}
 	var updated Run
 	err = s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
 		if strings.TrimSpace(result.Error) != "" {
 			if _, feedbackErr := s.AddFeedback(txCtx, actor, projectID, id, FeedbackInput{Source: "agent", Note: result.Error, Severity: "error"}); feedbackErr != nil {
 				return feedbackErr
 			}
+			status, phase, gate := StatusWaitingTestFeedback, PhaseTesting, GateTestFeedback
+			if result.ErrorCode == runner.ErrorCodeAuthRequired {
+				status, phase, gate = StatusFailed, PhaseImplementation, GateRunner
+			}
 			var updateErr error
-			updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: StatusWaitingTestFeedback, Phase: PhaseTesting, Gate: GateTestFeedback, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: result.Error})
+			updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: status, Phase: phase, Gate: gate, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: result.Error})
 			return updateErr
 		}
 		var updateErr error
@@ -402,6 +421,86 @@ func (s *Service) HandleAgentRunResult(ctx context.Context, actor identity.Actor
 		return failed, prErr
 	}
 	return s.updateState(ctx, actor, updated, StateUpdate{Status: updated.Status, Phase: updated.Phase, Gate: updated.Gate, CurrentAgentRunID: updated.CurrentAgentRunID, PullRequestID: operation.ID, CommitSHA: updated.CommitSHA, BaseSHA: updated.BaseSHA, Branch: updated.Branch, Attempt: updated.Attempt, UnresolvedPositions: updated.UnresolvedPositions, LastError: ""})
+}
+
+func intakeFailureMessage(err error) string {
+	const fallback = "Codex intake draft could not be saved; retry intake"
+	if err == nil {
+		return fallback
+	}
+	message := strings.TrimSpace(err.Error())
+	if strings.HasPrefix(message, "Codex intake ") {
+		return "Codex intake failed: " + message + "; retry intake"
+	}
+	if appErr := apperr.From(err); appErr != nil && appErr.Code != apperr.CodeInternal && strings.TrimSpace(appErr.Message) != "" {
+		return "Codex intake draft could not be saved: " + appErr.Message + "; retry intake"
+	}
+	return fallback
+}
+
+func (s *Service) failIntake(ctx context.Context, actor identity.Actor, projectID, id string, run Run, message string) (Run, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "Codex intake failed; retry intake"
+	}
+	if _, err := s.AddFeedback(ctx, actor, projectID, id, FeedbackInput{Source: "agent", Note: message, Severity: "error"}); err != nil {
+		return Run{}, err
+	}
+	return s.updateState(ctx, actor, run, StateUpdate{Status: StatusFailed, Phase: PhaseIntake, Gate: GateRunner, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: message})
+}
+
+func (s *Service) startIntakeAttempt(ctx context.Context, actor identity.Actor, run Run, retry bool) (Run, error) {
+	if s.agentRuns == nil {
+		return Run{}, apperr.New(apperr.CodeInternal, 503, "AgentRun adapter is unavailable", nil)
+	}
+	if retry && run.Attempt >= run.MaxAttempts {
+		return Run{}, apperr.New(apperr.CodeConflict, 409, "autonomous retry limit has been reached", map[string]any{"max_attempts": run.MaxAttempts})
+	}
+	var updated Run
+	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		item, itemErr := s.workItems.Get(txCtx, workitem.Scope{OrganizationID: actor.OrganizationID, ProjectID: run.ProjectID}, actor, run.WorkItemID)
+		if itemErr != nil {
+			return itemErr
+		}
+		policy := run.Policy.Normalize()
+		specificationVersion := 0
+		if s.spec != nil {
+			currentSpec, specErr := s.spec.Get(txCtx, actor.OrganizationID, run.ProjectID, run.WorkItemID)
+			if specErr != nil {
+				return specErr
+			}
+			if currentSpec != nil {
+				specificationVersion = currentSpec.Version
+			}
+		}
+		child, createErr := s.agentRuns.CreateAutonomousIntake(txCtx, systemActor(actor.OrganizationID), agentrun.CreateInput{
+			ProjectID: run.ProjectID, WorkItemID: run.WorkItemID, RepositoryID: run.RepositoryID,
+			AgentProvider: run.AgentProvider, AgentName: run.AgentName, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
+			BaseSHA: run.BaseSHA, ExecutionInputs: agentrun.ExecutionInputs{
+				Prompt: intakePrompt(item, run.Objective), SpecificationVersion: specificationVersion,
+				MCPPermissions: intakePermissions(policy.MCPPermissions), ExecutionProfile: policy.ExecutionProfile, NetworkPolicy: policy.NetworkPolicy,
+			},
+			ExecutionPolicy: map[string]any{"autonomous": true, "mode": "autonomous-intake", "workflow_id": run.ID, "runtime": policy.Runtime, "max_attempts": policy.MaxAttempts, "push_branch": false, "read_only": true, "created_by": actor.ID},
+		})
+		if createErr != nil {
+			return createErr
+		}
+		started, startErr := s.agentRuns.StartAutonomousForOrganization(txCtx, actor.OrganizationID, run.ProjectID, child.ID)
+		if startErr != nil {
+			return startErr
+		}
+		var updateErr error
+		updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: StatusIntake, Phase: PhaseIntake, Gate: GateNone, CurrentAgentRunID: started.ID, Attempt: run.Attempt + 1, UnresolvedPositions: run.UnresolvedPositions, LastError: ""})
+		return updateErr
+	})
+	if err != nil {
+		return Run{}, err
+	}
+	return updated, nil
+}
+
+func needsIntake(run Run) bool {
+	return run.Phase == PhaseIntake || (run.Status == StatusWaitingSpecReview && run.Attempt == 0 && run.CurrentAgentRunID == "")
 }
 
 func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Run, retry bool) (Run, error) {
@@ -447,7 +546,7 @@ func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Ru
 		}
 		child, createErr := s.agentRuns.Create(txCtx, systemActor(actor.OrganizationID), agentrun.CreateInput{
 			ProjectID: run.ProjectID, WorkItemID: run.WorkItemID, RepositoryID: run.RepositoryID,
-			AgentProvider: run.AgentProvider, AgentName: run.AgentName, Model: run.Model,
+			AgentProvider: run.AgentProvider, AgentName: run.AgentName, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 			BaseSHA: baseSHA, Branch: branch,
 			ExecutionInputs: agentrun.ExecutionInputs{Prompt: run.Objective + "\n\nAutonomous workflow attempt " + fmt.Sprint(run.Attempt+1) + ". Preserve passing test cases and fix only unresolved feedback.", TestCasePositions: positions, MCPPermissions: policy.MCPPermissions, ExecutionProfile: policy.ExecutionProfile, NetworkPolicy: policy.NetworkPolicy},
 			ExecutionPolicy: map[string]any{"autonomous": true, "workflow_id": run.ID, "runtime": policy.Runtime, "max_attempts": policy.MaxAttempts, "push_branch": policy.AutoCreatePR},
@@ -521,18 +620,21 @@ func normalizeStartInput(input StartInput) (StartInput, error) {
 	if input.WorkItemType == "" {
 		input.WorkItemType = "TASK"
 	}
-	input.Title = strings.TrimSpace(input.Title)
-	input.Objective = strings.TrimSpace(input.Objective)
+	input.Title = normalizeText(input.Title)
+	input.Objective = normalizeText(input.Objective)
 	input.RepositoryID = strings.TrimSpace(input.RepositoryID)
 	input.AgentProvider = strings.ToLower(strings.TrimSpace(input.AgentProvider))
-	input.AgentName = strings.TrimSpace(input.AgentName)
-	input.Model = strings.TrimSpace(input.Model)
-	input.TargetEnvironment = strings.TrimSpace(input.TargetEnvironment)
+	input.AgentName = normalizeText(input.AgentName)
+	input.Model = normalizeText(input.Model)
+	input.ReasoningEffort = normalizeText(input.ReasoningEffort)
+	input.BaseSHA = normalizeText(input.BaseSHA)
+	input.Branch = normalizeText(input.Branch)
+	input.TargetEnvironment = normalizeText(input.TargetEnvironment)
 	if input.ProjectID == "" || input.Objective == "" {
 		return StartInput{}, apperr.New(apperr.CodeInvalidArgument, 422, "project_id and objective are required", nil)
 	}
-	if len(input.Objective) > 131072 || len(input.Title) > 160 {
-		return StartInput{}, apperr.New(apperr.CodeInvalidArgument, 422, "autonomous objective or title is too long", nil)
+	if len(input.Objective) > 131072 || len(input.Title) > 160 || len(input.Model) > 120 || len(input.ReasoningEffort) > 64 || strings.ContainsAny(input.ReasoningEffort, "\x00\r\n") {
+		return StartInput{}, apperr.New(apperr.CodeInvalidArgument, 422, "autonomous objective, title, model, or reasoning effort is invalid or too long", nil)
 	}
 	if input.AgentProvider == "" {
 		input.AgentProvider = "codex"
@@ -548,6 +650,10 @@ func normalizeStartInput(input StartInput) (StartInput, error) {
 	}
 	input.TestCasePositions = uniquePositions(input.TestCasePositions)
 	return input, nil
+}
+
+func normalizeText(value string) string {
+	return strings.TrimSpace(strings.ToValidUTF8(value, "�"))
 }
 
 func providerAllowed(policy Policy, provider string) bool {

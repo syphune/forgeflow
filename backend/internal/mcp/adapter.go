@@ -43,6 +43,9 @@ func NewServiceAdapter(actor identity.Actor, workItems *workitem.Service, spec *
 }
 
 func (a ServiceAdapter) Call(ctx context.Context, name string, args map[string]any) (any, error) {
+	if !a.Actor.AllowsTool(name) {
+		return nil, apperr.New(apperr.CodeForbidden, 403, "MCP tool is not allowed for this run", map[string]any{"tool": name})
+	}
 	if name == "project.list" {
 		if a.Tenant == nil {
 			return nil, apperr.New(apperr.CodeInternal, 503, "tenant adapter is unavailable", nil)
@@ -282,7 +285,7 @@ func (a ServiceAdapter) Call(ctx context.Context, name string, args map[string]a
 		if a.AgentRuns == nil {
 			return nil, apperr.New(apperr.CodeInternal, 503, "AgentRun adapter is unavailable", nil)
 		}
-		return a.AgentRuns.Create(ctx, a.Actor, agentrun.CreateInput{ProjectID: scope.ProjectID, WorkItemID: stringArg(args, "work_item_id"), RepositoryID: stringArg(args, "repository_id"), AgentProvider: stringArg(args, "agent_provider"), AgentName: stringArg(args, "agent_name"), Model: stringArg(args, "model"), BaseSHA: stringArg(args, "base_sha"), Branch: stringArg(args, "branch"), ExecutionInputs: agentrun.ExecutionInputs{Prompt: stringArg(args, "prompt"), TestCasePositions: intSliceArg(args, "test_case_positions")}})
+		return a.AgentRuns.Create(ctx, a.Actor, agentrun.CreateInput{ProjectID: scope.ProjectID, WorkItemID: stringArg(args, "work_item_id"), RepositoryID: stringArg(args, "repository_id"), AgentProvider: stringArg(args, "agent_provider"), AgentName: stringArg(args, "agent_name"), Model: stringArg(args, "model"), ReasoningEffort: stringArg(args, "reasoning_effort"), BaseSHA: stringArg(args, "base_sha"), Branch: stringArg(args, "branch"), ExecutionInputs: agentrun.ExecutionInputs{Prompt: stringArg(args, "prompt"), TestCasePositions: intSliceArg(args, "test_case_positions")}})
 	case "agent_run.cancel":
 		if a.AgentRuns == nil {
 			return nil, apperr.New(apperr.CodeInternal, 503, "AgentRun adapter is unavailable", nil)
@@ -325,7 +328,7 @@ func (a ServiceAdapter) Call(ctx context.Context, name string, args map[string]a
 		if err != nil {
 			return nil, err
 		}
-		return a.Autonomous.Start(ctx, a.Actor, autonomous.StartInput{ProjectID: scope.ProjectID, WorkItemID: stringArg(args, "work_item_id"), WorkItemType: stringArg(args, "work_item_type"), Title: stringArg(args, "title"), RepositoryID: stringArg(args, "repository_id"), Objective: stringArg(args, "objective"), AgentProvider: stringArg(args, "agent_provider"), AgentName: stringArg(args, "agent_name"), Model: stringArg(args, "model"), BaseSHA: stringArg(args, "base_sha"), Branch: stringArg(args, "branch"), TargetEnvironment: stringArg(args, "target_environment"), TestCasePositions: intSliceArg(args, "test_case_positions"), Policy: policy})
+		return a.Autonomous.Start(ctx, a.Actor, autonomous.StartInput{ProjectID: scope.ProjectID, WorkItemID: stringArg(args, "work_item_id"), WorkItemType: stringArg(args, "work_item_type"), Title: stringArg(args, "title"), RepositoryID: stringArg(args, "repository_id"), Objective: stringArg(args, "objective"), AgentProvider: stringArg(args, "agent_provider"), AgentName: stringArg(args, "agent_name"), Model: stringArg(args, "model"), ReasoningEffort: stringArg(args, "reasoning_effort"), BaseSHA: stringArg(args, "base_sha"), Branch: stringArg(args, "branch"), TargetEnvironment: stringArg(args, "target_environment"), TestCasePositions: intSliceArg(args, "test_case_positions"), Policy: policy})
 	case "autonomous.get":
 		if a.Autonomous == nil {
 			return nil, apperr.New(apperr.CodeInternal, 503, "autonomous adapter is unavailable", nil)

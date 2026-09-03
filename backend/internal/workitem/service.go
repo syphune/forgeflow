@@ -162,6 +162,8 @@ func (s *Service) Create(ctx context.Context, scope Scope, actor identity.Actor,
 	if err := authorize(scope, actor, identity.CapabilityWorkItemCreate); err != nil {
 		return nil, err
 	}
+	input.Title = strings.ToValidUTF8(input.Title, "�")
+	input.Description = strings.ToValidUTF8(input.Description, "�")
 	if !validType(input.Type) {
 		return nil, apperr.New(apperr.CodeInvalidArgument, 422, "unsupported work item type", map[string]any{"type": input.Type})
 	}
@@ -533,10 +535,10 @@ func (s *Service) updateMutation(ctx context.Context, scope Scope, actor identit
 			if strings.TrimSpace(*input.Title) == "" {
 				return apperr.New(apperr.CodeInvalidArgument, 422, "title cannot be empty", nil)
 			}
-			item.Title = strings.TrimSpace(*input.Title)
+			item.Title = strings.TrimSpace(strings.ToValidUTF8(*input.Title, "�"))
 		}
 		if input.Description != nil {
-			item.Description = *input.Description
+			item.Description = strings.ToValidUTF8(*input.Description, "�")
 		}
 		if input.ParentIDSet {
 			if input.ParentID == nil {

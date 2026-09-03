@@ -312,7 +312,7 @@ Do not start a duplicate run after an uncertain request. Read the existing run f
 
 ### Autonomous
 
-Use `autonomous.start` only for an explicitly authorized server run and a policy-allowed provider. It may create a Work Item when `work_item_id` is absent, but the resulting objective is still only an initial description; it does not bypass specification review.
+Use `autonomous.start` only for an explicitly authorized server run and a policy-allowed provider. It may create a Work Item when `work_item_id` is absent; if the definition is incomplete, the server first runs the selected provider in read-only intake mode and stores the result as an unverified draft. It then pauses at specification review; it does not bypass human verification.
 
 Expected gates include `WAITING_SPEC_REVIEW`, `READY_FOR_EXECUTION`, `EXECUTING`, `WAITING_TEST_FEEDBACK`, `WAITING_PR_REVIEW`, deployment approval, and terminal completion/failure/cancellation. If it stops at specification review, fix gaps and obtain human review, then use `autonomous.resume`. If tests fail or are blocked, add bounded feedback and use `autonomous.retry` only for unresolved test positions. Passed positions must not be rerun merely for convenience.
 

@@ -17,13 +17,18 @@ type fingerprintPayload struct {
 	AgentProvider   string          `json:"agent_provider"`
 	AgentName       string          `json:"agent_name"`
 	Model           string          `json:"model"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	ExecutionInputs ExecutionInputs `json:"execution_inputs"`
 	ExecutionPolicy map[string]any  `json:"execution_policy"`
 }
 
 func approvalFingerprint(input CreateInput) (string, error) {
+	return approvalFingerprintVersioned(input, ApprovalFingerprintVersion)
+}
+
+func approvalFingerprintVersioned(input CreateInput, version int) (string, error) {
 	payload := fingerprintPayload{
-		Version:         ApprovalFingerprintVersion,
+		Version:         version,
 		RepositoryID:    strings.TrimSpace(input.RepositoryID),
 		BaseSHA:         strings.TrimSpace(input.BaseSHA),
 		Branch:          strings.TrimSpace(input.Branch),
@@ -32,6 +37,9 @@ func approvalFingerprint(input CreateInput) (string, error) {
 		Model:           strings.TrimSpace(input.Model),
 		ExecutionInputs: normalizeExecutionInputs(input.ExecutionInputs),
 		ExecutionPolicy: normalizeMap(input.ExecutionPolicy),
+	}
+	if version >= ApprovalFingerprintVersion {
+		payload.ReasoningEffort = strings.TrimSpace(input.ReasoningEffort)
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -42,16 +50,17 @@ func approvalFingerprint(input CreateInput) (string, error) {
 }
 
 func fingerprintForRun(run Run) (string, error) {
-	return approvalFingerprint(CreateInput{
+	return approvalFingerprintVersioned(CreateInput{
 		RepositoryID:    run.RepositoryID,
 		BaseSHA:         run.BaseSHA,
 		Branch:          run.Branch,
 		AgentProvider:   run.AgentProvider,
 		AgentName:       run.AgentName,
 		Model:           run.Model,
+		ReasoningEffort: run.ReasoningEffort,
 		ExecutionInputs: run.ExecutionInputs,
 		ExecutionPolicy: run.ExecutionPolicy,
-	})
+	}, run.ApprovalFingerprintVersion)
 }
 
 func encodeExecutionPolicy(inputs ExecutionInputs, policy map[string]any) ([]byte, error) {

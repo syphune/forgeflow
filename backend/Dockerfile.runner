@@ -14,7 +14,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/forgeflow-runner /usr/local/bin/forgeflow-runner
 RUN npm install --global @openai/codex @anthropic-ai/claude-code \
-    && groupadd --system docker \
+    && (getent group docker >/dev/null || groupadd --system docker) \
     && useradd --create-home --shell /usr/sbin/nologin --groups docker forgeflow
 
 RUN mkdir -p /var/lib/forgeflow/workspaces \

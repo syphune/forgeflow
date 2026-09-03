@@ -71,13 +71,14 @@ var capabilityKeys = []string{
 }
 
 type Actor struct {
-	Type           string
-	ID             string
-	Login          string
-	DisplayName    string
-	OrganizationID string
-	Source         string
-	Capabilities   map[string]bool
+	Type            string
+	ID              string
+	Login           string
+	DisplayName     string
+	OrganizationID  string
+	Source          string
+	Capabilities    map[string]bool
+	ToolPermissions map[string]bool
 	// ProjectCapabilities preserves the effective role for each project when
 	// authentication is unscoped. It is intentionally not folded into
 	// Capabilities, which would grant the union of project roles.
@@ -89,6 +90,13 @@ func (a Actor) Has(capability string) bool {
 		return false
 	}
 	return a.Capabilities["*"] || a.Capabilities[capability]
+}
+
+func (a Actor) AllowsTool(tool string) bool {
+	if len(a.ToolPermissions) == 0 {
+		return true
+	}
+	return a.ToolPermissions[strings.TrimSpace(tool)]
 }
 
 func (a Actor) ForProject(projectID string) Actor {

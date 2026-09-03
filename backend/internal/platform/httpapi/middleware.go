@@ -371,10 +371,19 @@ func CorrelationID(ctx context.Context) string {
 	return id
 }
 
-func WithAuthenticator(next http.Handler, authenticator identity.Authenticator) http.Handler {
+func WithAuthenticator(next http.Handler, authenticator identity.Authenticator, runnerSecrets ...string) http.Handler {
+	runnerSecret := firstSecret(runnerSecrets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/auth/logout" || r.URL.Path == "/api/v1/auth/github/start" || r.URL.Path == "/api/v1/auth/github/callback" || r.URL.Path == "/api/v1/integrations/github/install/callback" || r.URL.Path == "/api/v1/integrations/github/user/callback" || r.URL.Path == "/api/v1/integrations/github/webhooks" {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if actor, handled, err := runnerMCPActor(r, runnerSecret); handled {
+			if err != nil {
+				Error(w, r, err)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(identity.WithActor(r.Context(), actor)))
 			return
 		}
 		if authenticator == nil {
@@ -420,10 +429,19 @@ func projectIDFromRequest(r *http.Request) string {
 	return ""
 }
 
-func WithDevelopmentActor(next http.Handler) http.Handler {
+func WithDevelopmentActor(next http.Handler, runnerSecrets ...string) http.Handler {
+	runnerSecret := firstSecret(runnerSecrets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/auth/github/start" || r.URL.Path == "/api/v1/auth/github/callback" || r.URL.Path == "/api/v1/integrations/github/install/callback" || r.URL.Path == "/api/v1/integrations/github/user/callback" || r.URL.Path == "/api/v1/integrations/github/webhooks" {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if actor, handled, err := runnerMCPActor(r, runnerSecret); handled {
+			if err != nil {
+				Error(w, r, err)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(identity.WithActor(r.Context(), actor)))
 			return
 		}
 		orgID := strings.TrimSpace(r.Header.Get("X-Organization-ID"))
@@ -435,6 +453,35 @@ func WithDevelopmentActor(next http.Handler) http.Handler {
 		actor := identity.Actor{Type: "human", ID: actorID, OrganizationID: orgID, Source: "development-header", Capabilities: map[string]bool{"*": true}}
 		next.ServeHTTP(w, r.WithContext(identity.WithActor(r.Context(), actor)))
 	})
+}
+
+func firstSecret(secrets []string) string {
+	if len(secrets) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(secrets[0])
+}
+
+func runnerMCPActor(r *http.Request, secret string) (identity.Actor, bool, error) {
+	if strings.TrimSpace(secret) == "" || !isMCPPath(r.URL.Path) {
+		return identity.Actor{}, false, nil
+	}
+	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(authorization, "Bearer ") {
+		return identity.Actor{}, false, nil
+	}
+	claims, err := identity.VerifyRunnerMCPToken(secret, strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer ")), time.Now().UTC())
+	if err != nil {
+		return identity.Actor{}, false, nil
+	}
+	if projectIDFromRequest(r) != claims.ProjectID {
+		return identity.Actor{}, true, apperr.New(apperr.CodeForbidden, http.StatusForbidden, "runner MCP token is not valid for this project", nil)
+	}
+	return identity.ActorForRunnerMCP(claims), true, nil
+}
+
+func isMCPPath(path string) bool {
+	return path == "/api/v1/mcp" || strings.HasPrefix(path, "/api/v1/mcp/")
 }
 
 func RequireConfiguredAuth(next http.Handler) http.Handler {

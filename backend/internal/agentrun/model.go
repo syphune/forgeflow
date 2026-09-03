@@ -19,11 +19,12 @@ const (
 )
 
 const (
-	ApprovalFingerprintVersion = 1
-	HeartbeatInterval          = 15 * time.Second
-	HeartbeatTimeout           = 60 * time.Second
-	ProcessingGrace            = 15 * time.Second
-	HeartbeatDeadline          = HeartbeatTimeout + ProcessingGrace
+	ApprovalFingerprintVersion       = 2
+	legacyApprovalFingerprintVersion = 1
+	HeartbeatInterval                = 15 * time.Second
+	HeartbeatTimeout                 = 60 * time.Second
+	ProcessingGrace                  = 15 * time.Second
+	HeartbeatDeadline                = HeartbeatTimeout + ProcessingGrace
 )
 
 type ExecutionInputs struct {
@@ -48,6 +49,7 @@ type Run struct {
 	AgentProvider              string          `json:"agent_provider"`
 	AgentName                  string          `json:"agent_name"`
 	Model                      string          `json:"model"`
+	ReasoningEffort            string          `json:"reasoning_effort,omitempty"`
 	BaseSHA                    string          `json:"base_sha"`
 	Branch                     string          `json:"branch"`
 	ExecutionInputs            ExecutionInputs `json:"execution_inputs"`
@@ -75,6 +77,7 @@ type CreateInput struct {
 	AgentProvider   string
 	AgentName       string
 	Model           string
+	ReasoningEffort string
 	BaseSHA         string
 	Branch          string
 	ExecutionInputs ExecutionInputs

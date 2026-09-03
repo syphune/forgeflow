@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import type { AuthorizationContext, AutomationRule, AutonomousPolicy, BranchPolicy, BranchPolicyInput, CreateEnvironmentRequest, CustomFieldDefinition, DeliveryPolicy, Environment, Member, ProjectBoardSettings, WorkflowResponse } from "@forgeflow/api-client";
+import type { AuthorizationContext, AutomationRule, AutonomousPolicy, BranchPolicy, BranchPolicyInput, CreateEnvironmentRequest, CustomFieldDefinition, DeliveryPolicy, Environment, Member, ProjectBoardSettings, ProviderAuthStatus, WorkflowResponse } from "@forgeflow/api-client";
 import { statusLabel, translate as t } from "@forgeflow/ui";
 import { apiErrorMessage, browserAPI } from "../app/api";
 import { uiTone } from "../app/types";
@@ -243,7 +243,75 @@ function AutonomousSettings({ projectID, canManage }: { projectID: string; canMa
     }
   }
 
-  return <div className="app-v2-settings-stack"><DeliveryPolicySettings projectID={projectID} canManage={canManage} /><ErrorNotice error={error} retry={() => void load()} />{message ? <p className="app-v2-action-status" role="status">{message}</p> : null}{!canManage ? <ReadOnlyNotice /> : null}{loading || !policy ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /></div> : <form className="app-v2-settings-stack" onSubmit={savePolicy}><div className="app-v2-surface-card app-v2-settings-card"><div className="app-v2-card-heading"><div><h3>{t("settings.autonomous")}</h3><p>{t("settings.autonomous-help")}</p></div></div><div className="app-v2-form-grid"><label className="app-v2-checkbox"><input type="checkbox" checked={policy.enabled} onChange={(event) => updatePolicy({ enabled: event.target.checked })} disabled={!canManage} />{t("settings.autonomous-enabled")}</label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-runtime")}</span><select value={policy.runtime} onChange={(event) => updatePolicy({ runtime: event.target.value as AutonomousPolicy["runtime"] })} disabled={!canManage}><option value="server">Server runner</option><option value="desktop">Desktop runner</option><option value="auto">Automatic</option></select></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-provider")}</span><select multiple value={policy.providers} onChange={(event) => updatePolicy({ providers: Array.from(event.target.selectedOptions, (option) => option.value as "codex" | "claude") })} disabled={!canManage}><option value="codex">Codex</option><option value="claude">Claude</option></select></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-max-attempts")}</span><input type="number" min={1} max={10} value={policy.max_attempts} onChange={(event) => updatePolicy({ max_attempts: Number(event.target.value) })} disabled={!canManage} /></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-timeout")}</span><input type="number" min={60} max={86400} value={policy.timeout_seconds} onChange={(event) => setPolicy((current) => current ? { ...current, timeout_seconds: Number(event.target.value) } : current)} disabled={!canManage} /></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-test-scope")}</span><select value={policy.test_scope} onChange={(event) => updatePolicy({ test_scope: event.target.value as AutonomousPolicy["test_scope"] })} disabled={!canManage}><option value="unresolved_only">Unresolved only</option><option value="full_regression">Full regression</option></select></label><label className="app-v2-checkbox"><input type="checkbox" checked={policy.auto_retry} onChange={(event) => updatePolicy({ auto_retry: event.target.checked })} disabled={!canManage} />{t("settings.autonomous-auto-retry")}</label><label className="app-v2-checkbox"><input type="checkbox" checked={policy.auto_create_pr} onChange={(event) => updatePolicy({ auto_create_pr: event.target.checked })} disabled={!canManage} />{t("settings.autonomous-auto-pr")}</label></div><div className="app-v2-editor-actions"><button className="button button-primary" type="submit" disabled={!canManage || busy}>{busy ? t("settings.saving") : t("settings.save-autonomous")}</button></div></div></form>}<div className="app-v2-surface-card app-v2-settings-card"><div className="app-v2-card-heading"><div><h3>{t("settings.environments")}</h3><p>{t("settings.environments-help")}</p></div></div>{canManage ? <form className="app-v2-settings-create-grid" onSubmit={createEnvironment}><label className="app-v2-dialog-field"><span>{t("settings.environment-key")}</span><input value={environment.key} onChange={(event) => setEnvironment((current) => ({ ...current, key: event.target.value }))} maxLength={64} required /></label><label className="app-v2-dialog-field"><span>{t("settings.environment-name")}</span><input value={environment.name} onChange={(event) => setEnvironment((current) => ({ ...current, key: current.key, name: event.target.value }))} maxLength={120} required /></label><label className="app-v2-dialog-field"><span>{t("settings.environment-kind")}</span><select value={environment.kind} onChange={(event) => setEnvironment((current) => ({ ...current, kind: event.target.value as CreateEnvironmentRequest["kind"] }))}><option value="preview">Preview</option><option value="development">Development</option><option value="staging">Staging</option><option value="production">Production</option></select></label><button className="button button-primary" type="submit" disabled={busy}>{t("settings.add-environment")}</button></form> : null}{environments.length ? <div className="app-v2-rule-list">{environments.map((entry) => <div className="app-v2-rule-row" key={entry.id}><div><strong>{entry.name}</strong><small>{entry.key} · {entry.kind}</small></div><div className="app-v2-member-actions"><span className={`app-v2-chip is-${entry.require_approval ? "warning" : "success"}`}>{entry.require_approval ? t("settings.environment-approval") : t("settings.environment-auto")}</span></div></div>)}</div> : <div className="app-v2-empty"><strong>{t("settings.no-environments")}</strong><p>{t("settings.no-environments-description")}</p></div>}</div></div>;
+	return <div className="app-v2-settings-stack"><DeliveryPolicySettings projectID={projectID} canManage={canManage} /><ErrorNotice error={error} retry={() => void load()} />{message ? <p className="app-v2-action-status" role="status">{message}</p> : null}{!canManage ? <ReadOnlyNotice /> : null}{loading || !policy ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /></div> : <form className="app-v2-settings-stack" onSubmit={savePolicy}><div className="app-v2-surface-card app-v2-settings-card"><div className="app-v2-card-heading"><div><h3>{t("settings.autonomous")}</h3><p>{t("settings.autonomous-help")}</p></div></div><div className="app-v2-form-grid"><label className="app-v2-checkbox"><input type="checkbox" checked={policy.enabled} onChange={(event) => updatePolicy({ enabled: event.target.checked })} disabled={!canManage} />{t("settings.autonomous-enabled")}</label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-runtime")}</span><select value={policy.runtime} onChange={(event) => updatePolicy({ runtime: event.target.value as AutonomousPolicy["runtime"] })} disabled={!canManage}><option value="server">Server runner</option><option value="desktop">Desktop runner</option><option value="auto">Automatic</option></select></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-provider")}</span><select multiple value={policy.providers} onChange={(event) => updatePolicy({ providers: Array.from(event.target.selectedOptions, (option) => option.value as "codex" | "claude") })} disabled={!canManage}><option value="codex">Codex</option><option value="claude">Claude</option></select></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-max-attempts")}</span><input type="number" min={1} max={10} value={policy.max_attempts} onChange={(event) => updatePolicy({ max_attempts: Number(event.target.value) })} disabled={!canManage} /></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-timeout")}</span><input type="number" min={60} max={86400} value={policy.timeout_seconds} onChange={(event) => updatePolicy({ timeout_seconds: Number(event.target.value) })} disabled={!canManage} /></label><label className="app-v2-dialog-field"><span>{t("settings.autonomous-test-scope")}</span><select value={policy.test_scope} onChange={(event) => updatePolicy({ test_scope: event.target.value as AutonomousPolicy["test_scope"] })} disabled={!canManage}><option value="unresolved_only">Unresolved only</option><option value="full_regression">Full regression</option></select></label><label className="app-v2-checkbox"><input type="checkbox" checked={policy.auto_retry} onChange={(event) => updatePolicy({ auto_retry: event.target.checked })} disabled={!canManage} />{t("settings.autonomous-auto-retry")}</label><label className="app-v2-checkbox"><input type="checkbox" checked={policy.auto_create_pr} onChange={(event) => updatePolicy({ auto_create_pr: event.target.checked })} disabled={!canManage} />{t("settings.autonomous-auto-pr")}</label></div><div className="app-v2-editor-actions"><button className="button button-primary" type="submit" disabled={!canManage || busy}>{busy ? t("settings.saving") : t("settings.save-autonomous")}</button></div></div></form>}{canManage ? <ProviderAuthSettings projectID={projectID} client={client} /> : null}<div className="app-v2-surface-card app-v2-settings-card"><div className="app-v2-card-heading"><div><h3>{t("settings.environments")}</h3><p>{t("settings.environments-help")}</p></div></div>{canManage ? <form className="app-v2-settings-create-grid" onSubmit={createEnvironment}><label className="app-v2-dialog-field"><span>{t("settings.environment-key")}</span><input value={environment.key} onChange={(event) => setEnvironment((current) => ({ ...current, key: event.target.value }))} maxLength={64} required /></label><label className="app-v2-dialog-field"><span>{t("settings.environment-name")}</span><input value={environment.name} onChange={(event) => setEnvironment((current) => ({ ...current, key: current.key, name: event.target.value }))} maxLength={120} required /></label><label className="app-v2-dialog-field"><span>{t("settings.environment-kind")}</span><select value={environment.kind} onChange={(event) => setEnvironment((current) => ({ ...current, kind: event.target.value as CreateEnvironmentRequest["kind"] }))}><option value="preview">Preview</option><option value="development">Development</option><option value="staging">Staging</option><option value="production">Production</option></select></label><button className="button button-primary" type="submit" disabled={busy}>{t("settings.add-environment")}</button></form> : null}{environments.length ? <div className="app-v2-rule-list">{environments.map((entry) => <div className="app-v2-rule-row" key={entry.id}><div><strong>{entry.name}</strong><small>{entry.key} · {entry.kind}</small></div><div className="app-v2-member-actions"><span className={`app-v2-chip is-${entry.require_approval ? "warning" : "success"}`}>{entry.require_approval ? t("settings.environment-approval") : t("settings.environment-auto")}</span></div></div>)}</div> : <div className="app-v2-empty"><strong>{t("settings.no-environments")}</strong><p>{t("settings.no-environments-description")}</p></div>}</div></div>;
+}
+
+type ProviderName = "codex" | "claude";
+type BrowserAPI = ReturnType<typeof browserAPI>;
+
+function providerAuthStatusLabel(status: ProviderAuthStatus["status"]) {
+  if (status === "authenticated") return t("settings.provider-auth-authenticated");
+  if (status === "login_pending") return t("settings.provider-auth-pending");
+  if (status === "unavailable") return t("settings.provider-auth-unavailable");
+  return t("settings.provider-auth-login-required");
+}
+
+function providerAuthTone(status: ProviderAuthStatus["status"]) {
+  if (status === "authenticated") return "success";
+  if (status === "login_pending") return "info";
+  if (status === "unavailable") return "neutral";
+  return "warning";
+}
+
+function ProviderAuthSettings({ projectID, client }: { projectID: string; client: BrowserAPI }) {
+  const providers: ProviderName[] = ["codex", "claude"];
+  const [statuses, setStatuses] = useState<ProviderAuthStatus[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      setStatuses((await client.getProjectProviderAuth(projectID)).items ?? []);
+    } catch (cause) {
+      setError(apiErrorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, projectID]);
+
+  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
+
+  const pending = statuses.some((status) => status.status === "login_pending");
+  useEffect(() => {
+    if (!pending) return;
+    const timer = window.setInterval(() => void load(), 2000);
+    return () => window.clearInterval(timer);
+  }, [load, pending]);
+
+  function getStatus(provider: ProviderName): ProviderAuthStatus {
+    return statuses.find((status) => status.provider === provider) ?? { provider, status: "unavailable", message: t("settings.provider-auth-unavailable") };
+  }
+
+  async function action(provider: ProviderName, operation: "login" | "switch" | "logout") {
+    if (busy) return;
+    setBusy(`${provider}:${operation}`);
+    setError("");
+    setMessage("");
+    try {
+      const status = operation === "login" ? await client.loginProjectProvider(projectID, provider) : operation === "switch" ? await client.switchProjectProvider(projectID, provider) : await client.logoutProjectProvider(projectID, provider);
+      setStatuses((current) => [...current.filter((entry) => entry.provider !== provider), status]);
+      setMessage(t("settings.provider-auth-updated"));
+    } catch (cause) {
+      setError(apiErrorMessage(cause));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return <div className="app-v2-surface-card app-v2-settings-card"><div className="app-v2-card-heading"><div><h3>{t("settings.provider-auth")}</h3><p>{t("settings.provider-auth-help")}</p></div></div>{message ? <p className="app-v2-action-status" role="status">{message}</p> : null}<ErrorNotice error={error} retry={() => void load()} />{loading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /></div> : <div className="app-v2-rule-list">{providers.map((provider) => { const status = getStatus(provider); return <div className="app-v2-rule-row app-v2-provider-auth-row" key={provider}><div><strong>{provider === "codex" ? "Codex" : "Claude"}</strong><small>{status.message}</small>{status.verification_uri ? <a href={status.verification_uri} target="_blank" rel="noreferrer">{t("settings.provider-auth-open")}</a> : null}{status.user_code ? <small>{t("settings.provider-auth-code")}: <code>{status.user_code}</code></small> : null}</div><div className="app-v2-member-actions"><span className={`app-v2-chip is-${providerAuthTone(status.status)}`}>{providerAuthStatusLabel(status.status)}</span>{status.status === "login_required" ? <button className="button button-primary" type="button" onClick={() => void action(provider, "login")} disabled={Boolean(busy)}>{busy === `${provider}:login` ? t("settings.saving") : t("settings.provider-auth-login")}</button> : null}{status.status !== "unavailable" && status.status !== "login_required" ? <button className="button button-secondary" type="button" onClick={() => void action(provider, "switch")} disabled={Boolean(busy)}>{busy === `${provider}:switch` ? t("settings.saving") : t("settings.provider-auth-switch")}</button> : null}{status.status !== "unavailable" && status.status !== "login_required" ? <button className="button button-quiet is-danger" type="button" onClick={() => void action(provider, "logout")} disabled={Boolean(busy)}>{busy === `${provider}:logout` ? t("settings.saving") : t("settings.provider-auth-logout")}</button> : null}</div></div>; })}</div>}</div>;
 }
 
 function WorkflowSettings({ projectID, canManage }: { projectID: string; canManage: boolean }) {

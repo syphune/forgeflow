@@ -58,7 +58,7 @@ func TestToolSnapshotIsStaticAndDescriptive(t *testing.T) {
 }
 
 func TestToolSnapshotMatchesPinnedHash(t *testing.T) {
-	const want = "db8fdd7026fcd309251077803d016330726b98f30b8f8757cda2a45cbb600223"
+	const want = "2221821593c7e813006652e89eaa507a19c5e81bdd74c1ede36351b32092fc91"
 	if got := mcp.SnapshotHash(); got != want {
 		t.Fatalf("MCP tool snapshot changed: got %q, want %q", got, want)
 	}
@@ -82,6 +82,15 @@ func TestSpecificationToolsCannotBypassCapabilityChecks(t *testing.T) {
 	adapter := mcp.NewServiceAdapter(identity.Actor{Type: "agent", ID: "agent-1", OrganizationID: "org-1"}, application.WorkItems, application.Specifications, application.Tenant, application.Planning, "project-1")
 	if _, err := adapter.Call(context.Background(), "specification.propose", map[string]any{"work_item_id": "item-1", "field": "ACTUAL_BEHAVIOR", "value": "guess", "provenance": "AI_HYPOTHESIS"}); err == nil {
 		t.Fatal("specification proposal must require its capability")
+	}
+}
+
+func TestRunScopedMCPActorCannotCallUnlistedTool(t *testing.T) {
+	application := app.New(1 << 20)
+	actor := identity.Actor{Type: "agent", ID: "run-1", OrganizationID: "org-1", Capabilities: map[string]bool{"*": true}, ToolPermissions: map[string]bool{"agent_run.get": true}}
+	adapter := mcp.NewServiceAdapter(actor, application.WorkItems, application.Specifications, application.Tenant, application.Planning, "project-1")
+	if _, err := adapter.Call(context.Background(), "work_item.list", nil); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("unlisted tool error = %v", err)
 	}
 }
 

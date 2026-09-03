@@ -157,6 +157,7 @@ func objectSchema(required ...string) map[string]any {
 		"agent_provider":        map[string]any{"type": "string", "maxLength": 80},
 		"agent_name":            map[string]any{"type": "string", "maxLength": 120},
 		"model":                 map[string]any{"type": "string", "maxLength": 120},
+		"reasoning_effort":      map[string]any{"type": "string", "maxLength": 64},
 		"base_sha":              map[string]any{"type": "string", "maxLength": 128},
 		"branch":                map[string]any{"type": "string", "maxLength": 256},
 		"path":                  map[string]any{"type": "string", "maxLength": 1024},

@@ -1,4 +1,4 @@
-.PHONY: dev dev-local docker-dev dev-host dev-db test test-backend test-integration test-mcp mcp-bridge test-desktop test-e2e test-e2e-torture functional-e2e hard-e2e lint typecheck build generate migrate-up migrate-down security smoke
+.PHONY: dev dev-local docker-dev dev-host dev-db codex-status codex-login codex-logout codex-switch test test-backend test-integration test-mcp mcp-bridge test-desktop test-e2e test-e2e-torture functional-e2e hard-e2e lint typecheck build generate migrate-up migrate-down security smoke
 
 PNPM := $(shell if command -v pnpm >/dev/null 2>&1; then printf pnpm; else printf 'npm exec --yes --package=pnpm@10.14.0 -- pnpm'; fi)
 
@@ -9,7 +9,19 @@ dev-local:
 	$(MAKE) docker-dev
 
 docker-dev:
-	docker compose --env-file .env.local -f infra/compose.dev.yaml up --build
+	docker compose --env-file .env.local --profile autonomous -f infra/compose.dev.yaml up --build
+
+codex-status:
+	node scripts/codex-auth.mjs status
+
+codex-login:
+	node scripts/codex-auth.mjs login
+
+codex-logout:
+	node scripts/codex-auth.mjs logout
+
+codex-switch:
+	node scripts/codex-auth.mjs switch
 
 dev-host:
 	sh scripts/dev-local.sh

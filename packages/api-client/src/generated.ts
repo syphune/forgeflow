@@ -1504,6 +1504,85 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/projects/{id}/provider-auth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        /** Show server-side Codex and Claude CLI authentication status */
+        get: operations["listProjectProviderAuth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/provider-auth/{provider}/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+                provider: components["parameters"]["ProviderPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start browser/device authentication for a server-side provider CLI */
+        post: operations["loginProjectProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/provider-auth/{provider}/switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+                provider: components["parameters"]["ProviderPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign out and start a new browser/device authentication flow */
+        post: operations["switchProjectProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/provider-auth/{provider}/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+                provider: components["parameters"]["ProviderPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sign out the selected server-side provider CLI */
+        post: operations["logoutProjectProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/projects/{id}/delivery-policy": {
         parameters: {
             query?: never;
@@ -3177,6 +3256,36 @@ export interface components {
             project_id?: string;
             capabilities: string[];
         };
+        ProviderReasoningEffort: {
+            value: string;
+            description?: string;
+        };
+        ProviderModel: {
+            id: string;
+            display_name: string;
+            description?: string;
+            is_default: boolean;
+            default_reasoning_effort?: string;
+            reasoning_efforts: components["schemas"]["ProviderReasoningEffort"][];
+        };
+        ProviderAuthStatus: {
+            /** @enum {string} */
+            provider: "codex" | "claude";
+            /** @enum {string} */
+            status: "authenticated" | "login_required" | "login_pending" | "unavailable";
+            message: string;
+            /** Format: uri */
+            verification_uri?: string;
+            user_code?: string;
+            /** Format: date-time */
+            expires_at?: string | null;
+            models?: components["schemas"]["ProviderModel"][];
+            reasoning_efforts?: components["schemas"]["ProviderReasoningEffort"][];
+            model_catalog_message?: string;
+        };
+        ProviderAuthList: {
+            items: components["schemas"]["ProviderAuthStatus"][];
+        };
         CreateTokenRequest: {
             name: string;
             scopes?: string[];
@@ -3247,6 +3356,7 @@ export interface components {
             agent_provider: string;
             agent_name: string;
             model?: string;
+            reasoning_effort?: string;
             base_sha?: string;
             branch?: string;
             execution_inputs?: components["schemas"]["AgentRunExecutionInputs"];
@@ -3286,6 +3396,7 @@ export interface components {
             agent_provider: string;
             agent_name: string;
             model?: string;
+            reasoning_effort?: string;
             base_sha?: string;
             branch?: string;
             execution_inputs?: components["schemas"]["AgentRunExecutionInputs"];
@@ -3375,6 +3486,7 @@ export interface components {
             agent_provider?: "codex" | "claude";
             agent_name?: string;
             model?: string;
+            reasoning_effort?: string;
             target_environment?: string;
             test_case_positions?: number[];
             policy?: components["schemas"]["AutonomousPolicy"];
@@ -3396,6 +3508,7 @@ export interface components {
             agent_provider: string;
             agent_name: string;
             model?: string;
+            reasoning_effort?: string;
             target_environment?: string;
             policy: components["schemas"]["AutonomousPolicy"];
             /** @enum {string} */
@@ -3711,6 +3824,7 @@ export interface components {
         AutonomousRunID: string;
         DeploymentID: string;
         ProjectPathID: string;
+        ProviderPath: "codex" | "claude";
         ProjectIDHeader: string;
         IdempotencyKey: string;
     };
@@ -6507,6 +6621,104 @@ export interface operations {
                     "application/json": components["schemas"]["AutonomousPolicy"];
                 };
             };
+        };
+    };
+    listProjectProviderAuth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider authentication status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderAuthList"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+        };
+    };
+    loginProjectProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+                provider: components["parameters"]["ProviderPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Login flow status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderAuthStatus"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
+    switchProjectProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+                provider: components["parameters"]["ProviderPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Login flow status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderAuthStatus"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
+    logoutProjectProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["ProjectPathID"];
+                provider: components["parameters"]["ProviderPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Provider authentication status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderAuthStatus"];
+                };
+            };
+            403: components["responses"]["ForbiddenError"];
+            422: components["responses"]["ValidationError"];
         };
     };
     getProjectDeliveryPolicy: {

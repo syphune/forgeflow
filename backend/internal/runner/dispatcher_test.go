@@ -12,11 +12,11 @@ import (
 
 func TestHTTPDispatcherRoundTripAndError(t *testing.T) {
 	root := t.TempDir()
-	job := Job{ID: "job-1", AutonomousRunID: "autonomous-1", AgentRunID: "agent-1", Provider: "codex", Prompt: "run tests", RepositoryURL: "https://github.com/acme/app.git", Branch: "forgeflow/job-1", PushBranch: true, CommitMessage: "fix: run tests", WorkspaceRoot: root, Workspace: filepath.Join(root, "job-1"), TimeoutSeconds: 30, GitToken: "git-token"}
+	job := Job{ID: "job-1", AutonomousRunID: "autonomous-1", AgentRunID: "agent-1", Provider: "codex", Prompt: "run tests", RepositoryURL: "https://github.com/acme/app.git", Branch: "forgeflow/job-1", PushBranch: true, CommitMessage: "fix: run tests", WorkspaceRoot: root, Workspace: filepath.Join(root, "job-1"), TimeoutSeconds: 30, GitToken: "git-token", MCPURL: "https://forgeflow.example/api/v1/mcp?project_id=project-1", MCPToken: "mcp-token"}
 	var requestJob Job
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer runner-token" || r.Header.Get("X-Forgeflow-Git-Token") != "git-token" {
-			t.Fatalf("authorization headers = %q %q", r.Header.Get("Authorization"), r.Header.Get("X-Forgeflow-Git-Token"))
+		if r.Header.Get("Authorization") != "Bearer runner-token" || r.Header.Get("X-Forgeflow-Git-Token") != "git-token" || r.Header.Get("X-Forgeflow-MCP-Token") != "mcp-token" {
+			t.Fatalf("authorization headers = %q %q %q", r.Header.Get("Authorization"), r.Header.Get("X-Forgeflow-Git-Token"), r.Header.Get("X-Forgeflow-MCP-Token"))
 		}
 		if err := json.NewDecoder(r.Body).Decode(&requestJob); err != nil {
 			t.Fatalf("decode job: %v", err)
@@ -29,6 +29,17 @@ func TestHTTPDispatcherRoundTripAndError(t *testing.T) {
 	result, err := (HTTPDispatcher{BaseURL: server.URL, Token: "runner-token"}).Dispatch(context.Background(), job)
 	if err != nil || result.Output != "ok" || requestJob.ID != job.ID {
 		t.Fatalf("dispatch = %#v, err = %v, request = %#v", result, err, requestJob)
+	}
+
+	largeOutput := strings.Repeat("\n", maxOutputBytes/2)
+	largeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(Result{ExitCode: 0, Output: largeOutput})
+	}))
+	defer largeServer.Close()
+	largeResult, err := (HTTPDispatcher{BaseURL: largeServer.URL, Token: "runner-token"}).Dispatch(context.Background(), job)
+	if err != nil || largeResult.Output != largeOutput {
+		t.Fatalf("large dispatch = %#v, err = %v", largeResult, err)
 	}
 
 	failedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

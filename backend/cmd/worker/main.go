@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +23,9 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/platform/db"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
 	"github.com/forgeflow/forgeflow/backend/internal/runner"
+	"github.com/forgeflow/forgeflow/backend/internal/specification"
+	"github.com/forgeflow/forgeflow/backend/internal/workflow"
+	"github.com/forgeflow/forgeflow/backend/internal/workitem"
 )
 
 type eventHandler struct {
@@ -34,20 +38,29 @@ type eventHandler struct {
 	credentials interface {
 		RunnerGitCredential(context.Context, identity.Actor, string, string) (githubintegration.CloneCredential, error)
 	}
-	agentRuns     *agentrun.Service
-	autonomous    *autonomous.Service
-	dispatcher    runner.Dispatcher
-	workspaceRoot string
-	runnerImage   string
-	runnerCPU     string
-	runnerMemory  string
-	runnerPids    int
-	runnerNetwork string
+	agentRuns           *agentrun.Service
+	autonomous          *autonomous.Service
+	dispatcher          runner.Dispatcher
+	workspaceRoot       string
+	runnerImage         string
+	runnerCPU           string
+	runnerMemory        string
+	runnerPids          int
+	runnerNetwork       string
+	runnerToken         string
+	runnerMCPURL        string
+	runnerMCPToken      string
+	runnerGitConfigured bool
 }
+
+const maxStoredRunnerOutputBytes = 64 * 1024
 
 func (h eventHandler) Handle(ctx context.Context, event outbox.Event) error {
 	if event.EventType == "github.webhook.received" && h.webhooks != nil {
 		return h.webhooks.Process(ctx, event.AggregateID)
+	}
+	if event.EventType == "agent_run.interrupted" && h.agentRuns != nil && h.autonomous != nil {
+		return h.handleAutonomousInterrupt(ctx, event)
 	}
 	if event.EventType == "agent_run.autonomous_started" && h.agentRuns != nil && h.autonomous != nil {
 		return h.dispatchAutonomousRun(ctx, event)
@@ -60,23 +73,6 @@ func (h eventHandler) Handle(ctx context.Context, event outbox.Event) error {
 }
 
 func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Event) error {
-	if h.dispatcher == nil {
-		h.logger.Warn("autonomous AgentRun queued but runner dispatcher is not configured", "agent_run_id", event.AggregateID)
-		projectID, _ := event.Payload["project_id"].(string)
-		if strings.TrimSpace(projectID) == "" {
-			return fmt.Errorf("autonomous AgentRun event is missing project_id")
-		}
-		actor := identity.Actor{Type: "system", ID: "autonomous-worker", OrganizationID: event.OrganizationID, Source: "worker", Capabilities: map[string]bool{"*": true}}
-		run, _, _, err := h.agentRuns.Get(ctx, actor, projectID, event.AggregateID)
-		if err != nil {
-			return err
-		}
-		workflowID, _ := run.ExecutionPolicy["workflow_id"].(string)
-		if strings.TrimSpace(workflowID) == "" {
-			return fmt.Errorf("autonomous AgentRun %s is missing workflow_id", run.ID)
-		}
-		return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "autonomous runner is not configured")
-	}
 	projectID, _ := event.Payload["project_id"].(string)
 	if strings.TrimSpace(projectID) == "" {
 		return fmt.Errorf("autonomous AgentRun event is missing project_id")
@@ -86,9 +82,16 @@ func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Ev
 	if err != nil {
 		return err
 	}
+	if run.Status == agentrun.Completed || run.Status == agentrun.Failed || run.Status == agentrun.Cancelled || run.Status == agentrun.Interrupted {
+		return nil
+	}
 	workflowID, _ := run.ExecutionPolicy["workflow_id"].(string)
 	if strings.TrimSpace(workflowID) == "" {
 		return fmt.Errorf("autonomous AgentRun %s is missing workflow_id", run.ID)
+	}
+	if h.dispatcher == nil {
+		h.logger.Warn("autonomous AgentRun queued but runner dispatcher is not configured", "agent_run_id", event.AggregateID)
+		return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "autonomous runner is not configured")
 	}
 	if h.repositories == nil {
 		return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "repository resolver is not configured")
@@ -119,8 +122,35 @@ func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Ev
 	if pushBranch {
 		networkMode = "bridge"
 	}
+	readOnly, _ := run.ExecutionPolicy["read_only"].(bool)
+	mcpURL, mcpErr := mcpURLForProject(h.runnerMCPURL, projectID, readOnly)
+	if mcpErr != nil {
+		return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, mcpErr.Error())
+	}
+	mcpToken := strings.TrimSpace(h.runnerMCPToken)
+	if mcpURL != "" {
+		if mcpToken == "" {
+			permissions := append([]string(nil), run.ExecutionInputs.MCPPermissions...)
+			if len(permissions) == 0 {
+				permissions = autonomous.DefaultPolicy().MCPPermissions
+			}
+			mcpToken, mcpErr = identity.IssueRunnerMCPToken(h.runnerToken, identity.RunnerMCPClaims{
+				OrganizationID: event.OrganizationID,
+				ProjectID:      projectID,
+				AgentRunID:     run.ID,
+				Permissions:    permissions,
+				ExpiresAt:      time.Now().UTC().Add(2 * time.Hour).Unix(),
+			}, time.Now().UTC())
+			if mcpErr != nil {
+				return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "automatic server MCP authentication is unavailable")
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(networkMode), "none") {
+			return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "server runner MCP requires FORGEFLOW_RUNNER_NETWORK_MODE=bridge")
+		}
+	}
 	var gitToken string
-	if pushBranch {
+	if !readOnly && (pushBranch || h.runnerGitConfigured) {
 		if h.credentials == nil {
 			return h.failAutonomousDispatch(ctx, actor, projectID, workflowID, run, "GitHub runner credential provider is not configured")
 		}
@@ -130,11 +160,41 @@ func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Ev
 		}
 		gitToken = credential.Token
 	}
-	job := runner.Job{ID: run.ID, AutonomousRunID: workflowID, AgentRunID: run.ID, Provider: run.AgentProvider, Model: run.Model, Prompt: run.ExecutionInputs.Prompt, RepositoryURL: repository.CloneURL, BaseSHA: run.BaseSHA, Branch: run.Branch, PushBranch: pushBranch, CommitMessage: "chore: update Forgeflow work item", WorkspaceRoot: root, Workspace: filepath.Join(root, run.ID), Image: h.runnerImage, TimeoutSeconds: 3600, CPULimit: h.runnerCPU, MemoryLimit: h.runnerMemory, PidsLimit: h.runnerPids, NetworkMode: networkMode, AllowedHosts: []string{"github.com"}, MCPPermissions: run.ExecutionInputs.MCPPermissions, GitToken: gitToken}
+	job := runner.Job{ID: run.ID, AutonomousRunID: workflowID, AgentRunID: run.ID, Provider: run.AgentProvider, Model: run.Model, ReasoningEffort: run.ReasoningEffort, Prompt: run.ExecutionInputs.Prompt, RepositoryURL: repository.CloneURL, BaseSHA: run.BaseSHA, Branch: run.Branch, PushBranch: pushBranch, ReadOnly: readOnly, CommitMessage: "chore: update Forgeflow work item", WorkspaceRoot: root, Workspace: filepath.Join(root, run.ID), Image: h.runnerImage, TimeoutSeconds: 3600, CPULimit: h.runnerCPU, MemoryLimit: h.runnerMemory, PidsLimit: h.runnerPids, NetworkMode: networkMode, AllowedHosts: []string{"github.com"}, MCPPermissions: run.ExecutionInputs.MCPPermissions, MCPURL: mcpURL, MCPToken: mcpToken, GitToken: gitToken}
+	if _, heartbeatErr := h.agentRuns.Heartbeat(ctx, actor, projectID, run.ID); heartbeatErr != nil {
+		h.logger.Warn("could not record initial AgentRun heartbeat", "agent_run_id", run.ID, "error", heartbeatErr)
+	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(agentrun.HeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if _, heartbeatErr := h.agentRuns.Heartbeat(heartbeatCtx, actor, projectID, run.ID); heartbeatErr != nil && heartbeatCtx.Err() == nil {
+					h.logger.Warn("could not record AgentRun heartbeat", "agent_run_id", run.ID, "error", heartbeatErr)
+				}
+			}
+		}
+	}()
 	result, dispatchErr := h.dispatcher.Dispatch(ctx, job)
+	stopHeartbeat()
+	<-heartbeatDone
+	if dispatchErr != nil {
+		if result.Error == "" {
+			result.Error = dispatchErr.Error()
+		}
+		if result.ExitCode == 0 {
+			result.ExitCode = 1
+		}
+	}
 	output := result.Output
-	if len(output) > 480*1024 {
-		output = output[:480*1024]
+	if len(output) > maxStoredRunnerOutputBytes {
+		output = output[:maxStoredRunnerOutputBytes]
 	}
 	var errorValue *string
 	if dispatchErr != nil {
@@ -147,18 +207,76 @@ func (h eventHandler) dispatchAutonomousRun(ctx context.Context, event outbox.Ev
 		}
 		errorValue = &value
 	}
-	_, attachErr := h.agentRuns.AttachResult(ctx, actor, projectID, run.ID, agentrun.ResultInput{Result: map[string]any{"runner_output": output, "content_trust": "UNTRUSTED_CONTENT"}, Error: errorValue})
-	if attachErr != nil && dispatchErr == nil {
+	runnerResult := map[string]any{"runner_output": output, "content_trust": "UNTRUSTED_CONTENT"}
+	if result.ErrorCode != "" {
+		runnerResult["error_code"] = result.ErrorCode
+	}
+	_, attachErr := h.agentRuns.AttachResult(ctx, actor, projectID, run.ID, agentrun.ResultInput{Result: runnerResult, Error: errorValue})
+	if attachErr != nil {
 		return attachErr
 	}
 	if err := finishAgentRun(ctx, h.agentRuns, actor, projectID, run, dispatchErr != nil); err != nil {
 		return err
 	}
-	_, handleErr := h.autonomous.HandleAgentRunResult(ctx, actor, projectID, workflowID, result)
-	if dispatchErr != nil && handleErr == nil {
-		return dispatchErr
+	_, err = h.autonomous.HandleAgentRunResult(ctx, resultActorForAutonomousRun(actor, run.ExecutionPolicy), projectID, workflowID, result)
+	return err
+}
+
+func resultActorForAutonomousRun(actor identity.Actor, executionPolicy map[string]any) identity.Actor {
+	createdBy, _ := executionPolicy["created_by"].(string)
+	if strings.TrimSpace(createdBy) != "" {
+		actor.ID = strings.TrimSpace(createdBy)
 	}
-	return handleErr
+	return actor
+}
+
+func (h eventHandler) handleAutonomousInterrupt(ctx context.Context, event outbox.Event) error {
+	projectID, _ := event.Payload["project_id"].(string)
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Errorf("interrupted AgentRun event is missing project_id")
+	}
+	actor := identity.Actor{Type: "system", ID: "autonomous-worker", OrganizationID: event.OrganizationID, Source: "worker", Capabilities: map[string]bool{"*": true}}
+	run, _, _, err := h.agentRuns.Get(ctx, actor, projectID, event.AggregateID)
+	if err != nil {
+		return err
+	}
+	workflowID, _ := run.ExecutionPolicy["workflow_id"].(string)
+	if strings.TrimSpace(workflowID) == "" {
+		return nil
+	}
+	autonomousRun, _, err := h.autonomous.Get(ctx, actor, projectID, workflowID)
+	if err != nil {
+		return err
+	}
+	if autonomousRun.CurrentAgentRunID != run.ID || autonomousRun.Status == autonomous.StatusCompleted || autonomousRun.Status == autonomous.StatusCancelled || autonomousRun.Status == autonomous.StatusFailed {
+		return nil
+	}
+	reason, _ := event.Payload["reason"].(string)
+	if strings.TrimSpace(reason) == "" {
+		reason = "AgentRun was interrupted"
+	}
+	_, err = h.autonomous.HandleAgentRunResult(ctx, actor, projectID, workflowID, runner.Result{Error: reason})
+	return err
+}
+
+func mcpURLForProject(raw, projectID string, intake bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", fmt.Errorf("server runner MCP URL is invalid")
+	}
+	query := parsed.Query()
+	query.Set("project_id", strings.TrimSpace(projectID))
+	query.Del("mode")
+	if intake {
+		query.Set("mode", "intake")
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 func (h eventHandler) failAutonomousDispatch(ctx context.Context, actor identity.Actor, projectID, workflowID string, run agentrun.Run, message string) error {
@@ -250,16 +368,24 @@ func main() {
 	}
 	githubService := githubintegration.NewService(githubStore, githubClient, githubAppConfig, nil, nil, time.Now, nil)
 	webhookStore := githubintegration.NewPostgresWebhookStore(pool)
+	auditWriter := audit.NewPostgresWriter(pool)
+	outboxWriter := outbox.NewPostgresWriter(pool)
+	specService := specification.NewService(specification.NewPostgresStore(pool), time.Now, specification.Options{Recorder: specification.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Transaction: db.NewTransactionRunner(pool)})
+	workflowService := workflow.NewService(workflow.Default(), workflow.NewPostgresStore(pool))
+	workflowService.SetTransaction(db.NewTransactionRunner(pool))
+	workflowService.SetRecorder(workflow.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, time.Now)
+	workItemService := workitem.NewService(workitem.NewPostgresRepository(pool), specService, workflowService, auditWriter, outboxWriter, time.Now, db.NewTransactionRunner(pool))
+	specService.SetWorkItemStateReader(workItemService)
 	agentRunStore := agentrun.NewPostgresStore(pool)
 	webhookStore.SetAgentRunProjector(agentRunStore)
-	agentRunWatchdog := agentrun.NewService(agentRunStore, nil, agentrun.Options{Recorder: agentrun.MutationRecorder{Audit: audit.NewPostgresWriter(pool), Outbox: outbox.NewPostgresWriter(pool)}, Now: time.Now})
-	autonomousService := autonomous.NewService(autonomous.NewPostgresStore(pool), nil, nil, agentRunWatchdog, autonomous.Options{Recorder: autonomous.MutationRecorder{Audit: audit.NewPostgresWriter(pool), Outbox: outbox.NewPostgresWriter(pool)}, Now: time.Now})
+	agentRunWatchdog := agentrun.NewService(agentRunStore, workItemService, agentrun.Options{Recorder: agentrun.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Now: time.Now})
+	autonomousService := autonomous.NewService(autonomous.NewPostgresStore(pool), workItemService, specService, agentRunWatchdog, autonomous.Options{Recorder: autonomous.MutationRecorder{Audit: auditWriter, Outbox: outboxWriter}, Now: time.Now})
 	var dispatcher runner.Dispatcher
 	if cfg.RunnerURL != "" {
 		dispatcher = runner.HTTPDispatcher{BaseURL: cfg.RunnerURL, Token: cfg.RunnerToken}
 	}
 	go runAgentRunWatchdog(ctx, logger, agentRunWatchdog)
-	processor := outbox.NewPostgresProcessor(pool, eventHandler{logger: logger, automation: automationService, webhooks: webhookStore, repositories: githubStore, credentials: githubService, agentRuns: agentRunWatchdog, autonomous: autonomousService, dispatcher: dispatcher, workspaceRoot: cfg.RunnerWorkspaceRoot, runnerImage: cfg.RunnerImage, runnerCPU: cfg.RunnerCPULimit, runnerMemory: cfg.RunnerMemoryLimit, runnerPids: cfg.RunnerPidsLimit, runnerNetwork: cfg.RunnerNetworkMode}, time.Now)
+	processor := outbox.NewPostgresProcessor(pool, eventHandler{logger: logger, automation: automationService, webhooks: webhookStore, repositories: githubStore, credentials: githubService, agentRuns: agentRunWatchdog, autonomous: autonomousService, dispatcher: dispatcher, workspaceRoot: cfg.RunnerWorkspaceRoot, runnerImage: cfg.RunnerImage, runnerCPU: cfg.RunnerCPULimit, runnerMemory: cfg.RunnerMemoryLimit, runnerPids: cfg.RunnerPidsLimit, runnerNetwork: cfg.RunnerNetworkMode, runnerToken: cfg.RunnerToken, runnerMCPURL: cfg.RunnerMCPURL, runnerMCPToken: cfg.RunnerMCPToken, runnerGitConfigured: githubAppConfig.Configured()}, time.Now)
 	if err := processor.Run(ctx, time.Second); err != nil && err != context.Canceled {
 		logger.Error("worker stopped", "error", err)
 		os.Exit(1)

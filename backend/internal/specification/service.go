@@ -241,11 +241,22 @@ func (s *Service) Readiness(ctx context.Context, organizationID, projectID, work
 }
 
 func (s *Service) Update(ctx context.Context, organizationID, projectID, workItemID, actorType string, input UpdateInput) (*Specification, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if actorType != "human" {
 		return nil, apperr.New(apperr.CodeForbidden, 403, "AI actors must propose specification changes instead of writing facts", nil)
 	}
+	return s.update(ctx, organizationID, projectID, workItemID, actorType, input, HumanProvided, false)
+}
+
+// ApplyAIDraft materializes an agent's bounded draft as unverified content so
+// a human can edit and verify it. It is intentionally separate from Update;
+// callers cannot turn an AI draft into verified specification state.
+func (s *Service) ApplyAIDraft(ctx context.Context, organizationID, projectID, workItemID string, input UpdateInput) (*Specification, error) {
+	return s.update(ctx, organizationID, projectID, workItemID, "agent", input, AIInferred, true)
+}
+
+func (s *Service) update(ctx context.Context, organizationID, projectID, workItemID, actorType string, input UpdateInput, provenance Provenance, aiDraft bool) (*Specification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var result *Specification
 	err := s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
 		if err := s.requireContentState(txCtx, organizationID, projectID, workItemID); err != nil {
@@ -275,98 +286,141 @@ func (s *Service) Update(ctx context.Context, organizationID, projectID, workIte
 			spec.MediaRefs = mediaRefs
 		}
 		if input.Summary != nil {
-			spec.Summary = strings.TrimSpace(*input.Summary)
+			if !aiDraft || strings.TrimSpace(*input.Summary) != "" {
+				spec.Summary = strings.TrimSpace(*input.Summary)
+			}
 		}
 		if input.Fields != nil {
-			spec.Fields = make(map[FieldKey]Field, len(input.Fields))
-			for key, value := range input.Fields {
-				value = strings.TrimSpace(value)
-				if existing, ok := before.Fields[key]; ok && strings.TrimSpace(existing.Value) == value {
-					spec.Fields[key] = existing
-					continue
+			if aiDraft {
+				if spec.Fields == nil {
+					spec.Fields = make(map[FieldKey]Field, len(input.Fields))
 				}
-				spec.Fields[key] = Field{Key: key, Value: value, Provenance: HumanProvided, VerificationStatus: Unverified}
+				for key, value := range input.Fields {
+					value = strings.TrimSpace(value)
+					if existing, ok := before.Fields[key]; ok && existing.VerificationStatus == VerifiedByHuman {
+						continue
+					}
+					spec.Fields[key] = Field{Key: key, Value: value, Provenance: provenance, VerificationStatus: Unverified}
+				}
+			} else {
+				spec.Fields = make(map[FieldKey]Field, len(input.Fields))
+				for key, value := range input.Fields {
+					value = strings.TrimSpace(value)
+					if existing, ok := before.Fields[key]; ok && strings.TrimSpace(existing.Value) == value {
+						spec.Fields[key] = existing
+						continue
+					}
+					spec.Fields[key] = Field{Key: key, Value: value, Provenance: provenance, VerificationStatus: Unverified}
+				}
 			}
 		}
 		if input.ReproductionSteps != nil {
-			spec.ReproductionSteps = make([]ReproductionStep, len(input.ReproductionSteps))
-			for i, step := range input.ReproductionSteps {
-				step.Action = strings.TrimSpace(step.Action)
-				step.ExpectedResult = strings.TrimSpace(step.ExpectedResult)
-				step.ObservedResult = strings.TrimSpace(step.ObservedResult)
-				step.EvidenceRefs, err = normalizeEvidenceRefs(step.EvidenceRefs)
+			if aiDraft {
+				spec.ReproductionSteps, err = normalizeAIDraftSteps(input.ReproductionSteps, before.ReproductionSteps)
 				if err != nil {
 					return err
 				}
-				step.Position = i + 1
-				if i < len(before.ReproductionSteps) {
-					existing := before.ReproductionSteps[i]
-					if existing.Action == step.Action && existing.ExpectedResult == step.ExpectedResult && existing.ObservedResult == step.ObservedResult && sameStrings(existing.EvidenceRefs, step.EvidenceRefs) {
-						existing.Position = step.Position
-						spec.ReproductionSteps[i] = existing
-						continue
+			} else {
+				spec.ReproductionSteps = make([]ReproductionStep, len(input.ReproductionSteps))
+				for i, step := range input.ReproductionSteps {
+					step.Action = strings.TrimSpace(step.Action)
+					step.ExpectedResult = strings.TrimSpace(step.ExpectedResult)
+					step.ObservedResult = strings.TrimSpace(step.ObservedResult)
+					step.EvidenceRefs, err = normalizeEvidenceRefs(step.EvidenceRefs)
+					if err != nil {
+						return err
 					}
+					step.Position = i + 1
+					if i < len(before.ReproductionSteps) {
+						existing := before.ReproductionSteps[i]
+						if existing.Action == step.Action && existing.ExpectedResult == step.ExpectedResult && existing.ObservedResult == step.ObservedResult && sameStrings(existing.EvidenceRefs, step.EvidenceRefs) {
+							existing.Position = step.Position
+							spec.ReproductionSteps[i] = existing
+							continue
+						}
+					}
+					step.Provenance = HumanProvided
+					step.VerificationStatus = Unverified
+					step.VerifiedBy = ""
+					step.VerifiedAt = nil
+					spec.ReproductionSteps[i] = step
 				}
-				step.Provenance = HumanProvided
-				step.VerificationStatus = Unverified
-				step.VerifiedBy = ""
-				step.VerifiedAt = nil
-				spec.ReproductionSteps[i] = step
 			}
 		}
 		if input.Acceptance != nil {
-			spec.Acceptance = make([]AcceptanceCriterion, len(input.Acceptance))
-			for i, criterion := range input.Acceptance {
-				criterion.Statement = strings.TrimSpace(criterion.Statement)
-				criterion.Position = i + 1
-				if i < len(before.Acceptance) && before.Acceptance[i].Statement == criterion.Statement {
-					existing := before.Acceptance[i]
-					existing.Position = criterion.Position
-					spec.Acceptance[i] = existing
-					continue
+			if aiDraft {
+				spec.Acceptance, err = normalizeAIDraftAcceptance(input.Acceptance, before.Acceptance)
+				if err != nil {
+					return err
 				}
-				criterion.Provenance = HumanProvided
-				criterion.VerificationStatus = Unverified
-				criterion.VerifiedBy = ""
-				criterion.VerifiedAt = nil
-				spec.Acceptance[i] = criterion
+			} else {
+				spec.Acceptance = make([]AcceptanceCriterion, len(input.Acceptance))
+				for i, criterion := range input.Acceptance {
+					criterion.Statement = strings.TrimSpace(criterion.Statement)
+					criterion.Position = i + 1
+					if i < len(before.Acceptance) && before.Acceptance[i].Statement == criterion.Statement {
+						existing := before.Acceptance[i]
+						existing.Position = criterion.Position
+						spec.Acceptance[i] = existing
+						continue
+					}
+					criterion.Provenance = HumanProvided
+					criterion.VerificationStatus = Unverified
+					criterion.VerifiedBy = ""
+					criterion.VerifiedAt = nil
+					spec.Acceptance[i] = criterion
+				}
 			}
 		}
 		if input.RegressionCases != nil {
-			spec.RegressionCases = make([]RegressionTestCase, len(input.RegressionCases))
-			for i, testCase := range input.RegressionCases {
-				testCase.Position = i + 1
-				testCase.Scenario = strings.TrimSpace(testCase.Scenario)
-				testCase.ExpectedResult = strings.TrimSpace(testCase.ExpectedResult)
-				testCase.GateClass = normalizeGateClass(testCase.GateClass)
-				if !validGateClass(testCase.GateClass) {
-					return apperr.New(apperr.CodeInvalidArgument, 422, "regression test gate_class is invalid", nil)
+			if aiDraft {
+				spec.RegressionCases, err = normalizeAIDraftRegressionCases(input.RegressionCases, before.RegressionCases)
+				if err != nil {
+					return err
 				}
-				testCase.Provenance = HumanProvided
-				if i < len(before.RegressionCases) && before.RegressionCases[i].Scenario == testCase.Scenario && before.RegressionCases[i].ExpectedResult == testCase.ExpectedResult {
-					existing := before.RegressionCases[i]
-					existing.Position = testCase.Position
-					spec.RegressionCases[i] = existing
-					continue
+			} else {
+				spec.RegressionCases = make([]RegressionTestCase, len(input.RegressionCases))
+				for i, testCase := range input.RegressionCases {
+					testCase.Position = i + 1
+					testCase.Scenario = strings.TrimSpace(testCase.Scenario)
+					testCase.ExpectedResult = strings.TrimSpace(testCase.ExpectedResult)
+					testCase.GateClass = normalizeGateClass(testCase.GateClass)
+					if !validGateClass(testCase.GateClass) {
+						return apperr.New(apperr.CodeInvalidArgument, 422, "regression test gate_class is invalid", nil)
+					}
+					testCase.Provenance = HumanProvided
+					if i < len(before.RegressionCases) && before.RegressionCases[i].Scenario == testCase.Scenario && before.RegressionCases[i].ExpectedResult == testCase.ExpectedResult {
+						existing := before.RegressionCases[i]
+						existing.Position = testCase.Position
+						spec.RegressionCases[i] = existing
+						continue
+					}
+					testCase.VerificationStatus = Unverified
+					testCase.VerifiedBy = ""
+					testCase.VerifiedAt = nil
+					spec.RegressionCases[i] = testCase
 				}
-				testCase.VerificationStatus = Unverified
-				testCase.VerifiedBy = ""
-				testCase.VerifiedAt = nil
-				spec.RegressionCases[i] = testCase
 			}
 		}
 		if input.ContextRefs != nil {
-			spec.ContextRefs = make([]ContextRef, len(input.ContextRefs))
-			for i, ref := range input.ContextRefs {
-				ref.RepositoryID = strings.TrimSpace(ref.RepositoryID)
-				ref.Module = strings.TrimSpace(ref.Module)
-				ref.File = strings.TrimSpace(ref.File)
-				ref.Symbol = strings.TrimSpace(ref.Symbol)
-				ref.Commit = strings.TrimSpace(ref.Commit)
-				ref.PullRequest = strings.TrimSpace(ref.PullRequest)
-				ref.Rationale = strings.TrimSpace(ref.Rationale)
-				ref.Provenance = HumanProvided
-				spec.ContextRefs[i] = ref
+			if aiDraft {
+				spec.ContextRefs, err = normalizeAIDraftContextRefs(input.ContextRefs)
+				if err != nil {
+					return err
+				}
+			} else {
+				spec.ContextRefs = make([]ContextRef, len(input.ContextRefs))
+				for i, ref := range input.ContextRefs {
+					ref.RepositoryID = strings.TrimSpace(ref.RepositoryID)
+					ref.Module = strings.TrimSpace(ref.Module)
+					ref.File = strings.TrimSpace(ref.File)
+					ref.Symbol = strings.TrimSpace(ref.Symbol)
+					ref.Commit = strings.TrimSpace(ref.Commit)
+					ref.PullRequest = strings.TrimSpace(ref.PullRequest)
+					ref.Rationale = strings.TrimSpace(ref.Rationale)
+					ref.Provenance = HumanProvided
+					spec.ContextRefs[i] = ref
+				}
 			}
 		}
 		if input.RepositoryID != nil {
@@ -384,6 +438,100 @@ func (s *Service) Update(ctx context.Context, organizationID, projectID, workIte
 		return nil
 	})
 	return result, err
+}
+
+func normalizeAIDraftSteps(values, existing []ReproductionStep) ([]ReproductionStep, error) {
+	if len(values) == 0 && len(existing) > 0 {
+		return existing, nil
+	}
+	result := make([]ReproductionStep, len(values))
+	for i, step := range values {
+		step.Action = strings.TrimSpace(step.Action)
+		step.ExpectedResult = strings.TrimSpace(step.ExpectedResult)
+		step.ObservedResult = strings.TrimSpace(step.ObservedResult)
+		var err error
+		step.EvidenceRefs, err = normalizeEvidenceRefs(step.EvidenceRefs)
+		if err != nil {
+			return nil, err
+		}
+		step.Position = i + 1
+		step.Provenance = AIInferred
+		step.VerificationStatus = Unverified
+		step.VerifiedBy = ""
+		step.VerifiedAt = nil
+		if i < len(existing) && existing[i].VerificationStatus == VerifiedByHuman {
+			result[i] = existing[i]
+			result[i].Position = step.Position
+			continue
+		}
+		result[i] = step
+	}
+	return result, nil
+}
+
+func normalizeAIDraftAcceptance(values, existing []AcceptanceCriterion) ([]AcceptanceCriterion, error) {
+	if len(values) == 0 && len(existing) > 0 {
+		return existing, nil
+	}
+	result := make([]AcceptanceCriterion, len(values))
+	for i, criterion := range values {
+		criterion.Statement = strings.TrimSpace(criterion.Statement)
+		criterion.Position = i + 1
+		criterion.Provenance = AIInferred
+		criterion.VerificationStatus = Unverified
+		criterion.VerifiedBy = ""
+		criterion.VerifiedAt = nil
+		if i < len(existing) && existing[i].VerificationStatus == VerifiedByHuman {
+			result[i] = existing[i]
+			result[i].Position = criterion.Position
+			continue
+		}
+		result[i] = criterion
+	}
+	return result, nil
+}
+
+func normalizeAIDraftRegressionCases(values, existing []RegressionTestCase) ([]RegressionTestCase, error) {
+	if len(values) == 0 && len(existing) > 0 {
+		return existing, nil
+	}
+	result := make([]RegressionTestCase, len(values))
+	for i, testCase := range values {
+		testCase.Position = i + 1
+		testCase.Scenario = strings.TrimSpace(testCase.Scenario)
+		testCase.ExpectedResult = strings.TrimSpace(testCase.ExpectedResult)
+		testCase.GateClass = normalizeGateClass(testCase.GateClass)
+		if !validGateClass(testCase.GateClass) {
+			return nil, apperr.New(apperr.CodeInvalidArgument, 422, "AI regression test gate_class is invalid", nil)
+		}
+		testCase.Provenance = AIInferred
+		testCase.VerificationStatus = Unverified
+		testCase.VerifiedBy = ""
+		testCase.VerifiedAt = nil
+		if i < len(existing) && existing[i].VerificationStatus == VerifiedByHuman {
+			result[i] = existing[i]
+			result[i].Position = testCase.Position
+			continue
+		}
+		result[i] = testCase
+	}
+	return result, nil
+}
+
+func normalizeAIDraftContextRefs(values []ContextRef) ([]ContextRef, error) {
+	result := make([]ContextRef, len(values))
+	for i, ref := range values {
+		ref.RepositoryID = strings.TrimSpace(ref.RepositoryID)
+		ref.Module = strings.TrimSpace(ref.Module)
+		ref.File = strings.TrimSpace(ref.File)
+		ref.Symbol = strings.TrimSpace(ref.Symbol)
+		ref.Commit = strings.TrimSpace(ref.Commit)
+		ref.PullRequest = strings.TrimSpace(ref.PullRequest)
+		ref.Rationale = strings.TrimSpace(ref.Rationale)
+		ref.Provenance = AIInferred
+		result[i] = ref
+	}
+	return result, nil
 }
 
 func (s *Service) saveReviewed(ctx context.Context, organizationID, projectID string, spec *Specification, expectedVersion int) error {

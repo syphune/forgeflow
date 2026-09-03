@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,11 @@ import (
 )
 
 const maxOutputBytes = 2 << 20
+
+const (
+	codexAuthRequiredMessage  = "Codex CLI authentication is required or the session has expired; sign in from Project Settings, then retry the run."
+	claudeAuthRequiredMessage = "Claude CLI authentication is required or the session has expired; sign in from Project Settings, then retry the run."
+)
 
 type CommandRunner interface {
 	Run(context.Context, string, string, []string, io.Writer, io.Writer, []string) error
@@ -35,11 +42,20 @@ type Executor struct {
 	Now                 func() time.Time
 	UseDocker           bool
 	DockerWorkspaceRoot string
+	CodexAuthHostPath   string
+	ClaudeAuthHostPath  string
 }
 
 func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) (Result, error) {
 	if err := job.Validate(); err != nil {
 		return Result{}, err
+	}
+	if e.UseDocker && providerAuthPath(job.Provider, e.CodexAuthHostPath, e.ClaudeAuthHostPath) == "" {
+		result := Result{ExitCode: 1, Error: authRequiredMessage(job.Provider), ErrorCode: ErrorCodeAuthRequired}
+		if emit != nil {
+			_ = emit(Event{JobID: job.ID, Type: EventFailed, ExitCode: result.ExitCode, Error: result.Error, ErrorCode: result.ErrorCode})
+		}
+		return result, errors.New(result.Error)
 	}
 	if err := os.MkdirAll(filepath.Clean(job.Workspace), 0o700); err != nil {
 		return Result{}, fmt.Errorf("prepare runner workspace: %w", err)
@@ -56,6 +72,12 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 	if err := e.prepareWorkspace(ctx, job); err != nil {
 		return Result{}, err
 	}
+	preparedJob, cleanupMCP, err := e.prepareMCP(job)
+	if err != nil {
+		return Result{}, err
+	}
+	defer cleanupMCP()
+	job = preparedJob
 	if emit != nil {
 		if err := emit(Event{JobID: job.ID, Type: EventStarted}); err != nil {
 			return Result{}, err
@@ -67,27 +89,38 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 	}
 	output := &limitedBuffer{limit: maxOutputBytes}
 	environment := safeEnvironment(job.Environment, job.Provider)
+	redactionEnvironment := append([]string(nil), environment...)
+	if strings.TrimSpace(job.MCPToken) != "" {
+		redactionEnvironment = append(redactionEnvironment, "FORGEFLOW_MCP_TOKEN="+job.MCPToken)
+		environment = append(environment, "FORGEFLOW_MCP_TOKEN="+job.MCPToken)
+	}
 	if e.UseDocker {
 		err = e.runInContainer(ctx, job, name, args, output, environment)
 	} else {
 		err = e.Commands.Run(ctx, job.Workspace, name, args, output, output, environment)
 	}
-	result := Result{ExitCode: 0, Output: redactSecrets(output.String(), environment)}
+	result := Result{ExitCode: 0, Output: redactSecrets(output.String(), redactionEnvironment)}
 	if err != nil {
 		result.ExitCode = exitCode(err)
-		result.Error = redactSecrets(boundedError(err), environment)
+		result.Error = redactSecrets(boundedError(err), redactionEnvironment)
 		if ctx.Err() != nil {
 			result.Error = "runner timed out or was cancelled"
+		} else if isProviderUsageLimit(job.Provider, result.Output, err) {
+			result.ErrorCode = ErrorCodeUsageLimit
+			result.Error = providerUsageLimitMessage(job.Provider)
+		} else if isProviderAuthFailure(job.Provider, result.Output, err) {
+			result.ErrorCode = ErrorCodeAuthRequired
+			result.Error = authRequiredMessage(job.Provider)
 		}
 		if emit != nil {
-			_ = emit(Event{JobID: job.ID, Type: EventFailed, Text: result.Output, ExitCode: result.ExitCode, Error: result.Error})
+			_ = emit(Event{JobID: job.ID, Type: EventFailed, Text: result.Output, ExitCode: result.ExitCode, Error: result.Error, ErrorCode: result.ErrorCode})
 		}
 		return result, err
 	}
 	if job.PushBranch {
 		if err := e.finalizeAndPush(ctx, job); err != nil {
 			result.ExitCode = 1
-			result.Error = redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + job.GitToken})
+			result.Error = redactSecrets(boundedError(err), append(redactionEnvironment, "GIT_TOKEN="+job.GitToken))
 			if emit != nil {
 				_ = emit(Event{JobID: job.ID, Type: EventFailed, Text: result.Output, ExitCode: result.ExitCode, Error: result.Error})
 			}
@@ -119,6 +152,9 @@ func (e Executor) finalizeAndPush(ctx context.Context, job Job) error {
 }
 
 func (e Executor) prepareWorkspace(ctx context.Context, job Job) error {
+	if job.ReadOnly {
+		return nil
+	}
 	if strings.TrimSpace(job.RepositoryURL) == "" {
 		return nil
 	}
@@ -161,7 +197,7 @@ func (e Executor) runGitWithToken(ctx context.Context, action, dir string, args 
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s: runner timed out or was cancelled", action)
 		}
-		return fmt.Errorf("%s: %s", action, redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + token}))
+		return gitCommandError(action, err, output.String(), token)
 	}
 	return nil
 }
@@ -176,24 +212,119 @@ func (e Executor) runGitOutputWithToken(ctx context.Context, action, dir string,
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("%s: runner timed out or was cancelled", action)
 		}
-		return "", fmt.Errorf("%s: %s", action, redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + token}))
+		return "", gitCommandError(action, err, output.String(), token)
 	}
 	return output.String(), nil
+}
+
+func gitCommandError(action string, err error, output, token string) error {
+	details := strings.TrimSpace(redactSecrets(output, []string{"GIT_TOKEN=" + strings.TrimSpace(token)}))
+	if details != "" {
+		if len(details) > 3500 {
+			details = details[:3500]
+		}
+		return fmt.Errorf("%s: %s (%s)", action, details, boundedError(err))
+	}
+	return fmt.Errorf("%s: %s", action, redactSecrets(boundedError(err), []string{"GIT_TOKEN=" + strings.TrimSpace(token)}))
+}
+
+func (e Executor) prepareMCP(job Job) (Job, func(), error) {
+	if strings.TrimSpace(job.MCPURL) == "" {
+		return job, func() {}, nil
+	}
+	token := strings.TrimSpace(job.MCPToken)
+	if token == "" {
+		return Job{}, nil, errors.New("MCP authentication token is required")
+	}
+	if strings.EqualFold(strings.TrimSpace(job.Provider), "codex") {
+		return job, func() {}, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(job.Provider), "claude") {
+		return job, func() {}, nil
+	}
+	config, err := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"forgeflow": map[string]any{
+				"type": "http",
+				"url":  strings.TrimSpace(job.MCPURL),
+				"headers": map[string]string{
+					"Authorization": "Bearer " + token,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return Job{}, nil, fmt.Errorf("encode Claude MCP configuration: %w", err)
+	}
+	if e.UseDocker {
+		job.MCPConfigPath = "/tmp/forgeflow-mcp.json"
+		job.MCPConfigContents = string(config)
+		return job, func() {}, nil
+	}
+	secretDir := filepath.Join(filepath.Clean(job.WorkspaceRoot), ".forgeflow-secrets")
+	if err := os.MkdirAll(secretDir, 0o700); err != nil {
+		return Job{}, nil, fmt.Errorf("prepare MCP secret directory: %w", err)
+	}
+	file, err := os.CreateTemp(secretDir, "claude-mcp-*.json")
+	if err != nil {
+		return Job{}, nil, fmt.Errorf("prepare Claude MCP configuration: %w", err)
+	}
+	path := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return Job{}, nil, fmt.Errorf("prepare Claude MCP configuration: %w", err)
+	}
+	if _, err := file.Write(config); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return Job{}, nil, fmt.Errorf("prepare Claude MCP configuration: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return Job{}, nil, fmt.Errorf("prepare Claude MCP configuration: %w", err)
+	}
+	job.MCPConfigPath = path
+	return job, func() { _ = os.Remove(path); _ = os.Remove(secretDir) }, nil
 }
 
 func providerCommand(job Job) (string, []string, error) {
 	prompt := strings.TrimSpace(job.Prompt)
 	switch strings.ToLower(strings.TrimSpace(job.Provider)) {
 	case "codex":
-		args := []string{"exec", "--json", "--full-auto"}
+		args := []string{"exec"}
+		if job.ReadOnly {
+			args = append(args, "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check")
+		} else {
+			args = append(args, "--json", "--full-auto")
+		}
 		if strings.TrimSpace(job.Model) != "" {
 			args = append(args, "--model", strings.TrimSpace(job.Model))
+		}
+		if reasoningEffort := strings.TrimSpace(job.ReasoningEffort); reasoningEffort != "" {
+			args = append(args, "--config", `model_reasoning_effort="`+reasoningEffort+`"`)
+		}
+		if mcpURL := strings.TrimSpace(job.MCPURL); mcpURL != "" {
+			args = append(args, "--config", "mcp_servers.forgeflow.url="+strconv.Quote(mcpURL), "--config", `mcp_servers.forgeflow.bearer_token_env_var="FORGEFLOW_MCP_TOKEN"`, "--config", `mcp_servers.forgeflow.default_tools_approval_mode="approve"`)
+		}
+		if job.ReadOnly && len(job.MCPPermissions) > 0 {
+			permissions, _ := json.Marshal(job.MCPPermissions)
+			args = append(args, "--config", "mcp_servers.forgeflow.enabled_tools="+string(permissions))
 		}
 		return "codex", append(args, prompt), nil
 	case "claude":
 		args := []string{"--print", "--output-format", "json"}
+		if job.ReadOnly {
+			args = append(args, "--permission-mode", "plan")
+		}
 		if strings.TrimSpace(job.Model) != "" {
 			args = append(args, "--model", strings.TrimSpace(job.Model))
+		}
+		if reasoningEffort := strings.TrimSpace(job.ReasoningEffort); reasoningEffort != "" {
+			args = append(args, "--effort", reasoningEffort)
+		}
+		if mcpConfig := strings.TrimSpace(job.MCPConfigPath); mcpConfig != "" {
+			args = append(args, "--mcp-config", mcpConfig)
 		}
 		return "claude", append(args, prompt), nil
 	default:
@@ -205,13 +336,10 @@ func safeEnvironment(extra map[string]string, provider string) []string {
 	allowed := map[string]bool{"PATH": true, "LANG": true, "LC_ALL": true, "TMPDIR": true, "HOME": true}
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
-		allowed["OPENAI_API_KEY"] = true
 		allowed["OPENAI_BASE_URL"] = true
 		allowed["CODEX_HOME"] = true
 	case "claude":
-		allowed["ANTHROPIC_API_KEY"] = true
 		allowed["ANTHROPIC_BASE_URL"] = true
-		allowed["CLAUDE_CODE_OAUTH_TOKEN"] = true
 	}
 	result := make([]string, 0, len(extra)+4)
 	for _, entry := range os.Environ() {
@@ -249,16 +377,154 @@ func (e Executor) runInContainer(ctx context.Context, job Job, name string, args
 		return err
 	}
 	imageIndex := len(containerArgs) - 1
+	useCodexAuth := strings.EqualFold(strings.TrimSpace(job.Provider), "codex") && strings.TrimSpace(e.CodexAuthHostPath) != ""
+	useClaudeAuth := strings.EqualFold(strings.TrimSpace(job.Provider), "claude") && strings.TrimSpace(e.ClaudeAuthHostPath) != ""
+	if useCodexAuth {
+		containerArgs, imageIndex, err = appendAuthMount(containerArgs, imageIndex, e.CodexAuthHostPath, "/tmp/forgeflow-codex-auth.json", true)
+		if err != nil {
+			return err
+		}
+	}
+	if useClaudeAuth {
+		containerArgs, imageIndex, err = appendAuthMount(containerArgs, imageIndex, e.ClaudeAuthHostPath, "/tmp/claude-home", false)
+		if err != nil {
+			return err
+		}
+	}
+	containerEnvironment := append([]string(nil), environment...)
+	entrypoint := name
+	commandArgs := args
+	if useCodexAuth {
+		entrypoint = "/bin/sh"
+		commandArgs = append([]string{"-c", `umask 077; mkdir -p /tmp/codex-home; cp /tmp/forgeflow-codex-auth.json /tmp/codex-home/auth.json; exec codex "$@"`, "--"}, args...)
+	}
+	if job.MCPConfigContents != "" {
+		containerEnvironment = append(containerEnvironment, "FORGEFLOW_CLAUDE_MCP_CONFIG="+job.MCPConfigContents)
+		entrypoint = "/bin/sh"
+		commandArgs = append([]string{"-c", `umask 077; printf '%s' "$FORGEFLOW_CLAUDE_MCP_CONFIG" > /tmp/forgeflow-mcp.json; exec claude "$@"`, "--"}, args...)
+	}
 	argsWithEnvironment := append([]string(nil), containerArgs[:imageIndex]...)
-	for _, entry := range environment {
+	for _, entry := range containerEnvironment {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok && key != "" {
 			argsWithEnvironment = append(argsWithEnvironment, "--env", key)
 		}
 	}
-	argsWithEnvironment = append(argsWithEnvironment, "--entrypoint", name, containerArgs[imageIndex])
-	argsWithEnvironment = append(argsWithEnvironment, args...)
-	return e.Commands.Run(ctx, "", "docker", argsWithEnvironment, output, output, environment)
+	if useCodexAuth {
+		argsWithEnvironment = append(argsWithEnvironment, "--env", "CODEX_HOME=/tmp/codex-home")
+	}
+	if useClaudeAuth {
+		argsWithEnvironment = append(argsWithEnvironment, "--env", "CLAUDE_CONFIG_DIR=/tmp/claude-home")
+	}
+	argsWithEnvironment = append(argsWithEnvironment, "--entrypoint", entrypoint, containerArgs[imageIndex])
+	argsWithEnvironment = append(argsWithEnvironment, commandArgs...)
+	if err := e.Commands.Run(ctx, "", "docker", argsWithEnvironment, output, output, containerEnvironment); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = e.Commands.Run(cleanupCtx, "", "docker", []string{"rm", "-f", dockerContainerName(job.ID)}, io.Discard, io.Discard, nil)
+		return err
+	}
+	return nil
+}
+
+func isProviderAuthFailure(provider, output string, err error) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "codex" && provider != "claude" {
+		return false
+	}
+	message := strings.ToLower(output)
+	if err != nil {
+		message += "\n" + strings.ToLower(err.Error())
+	}
+	for _, marker := range []string{
+		"not logged in",
+		"login required",
+		"please log in",
+		"codex login",
+		"claude auth login",
+		"authentication",
+		"authentication required",
+		"invalid authentication",
+		"api key",
+		"unauthorized",
+		"401",
+		"token expired",
+		"token is expired",
+		"expired token",
+		"access token has expired",
+		"refresh token",
+		"bind source path does not exist",
+		"mount source path",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return strings.Contains(message, "no such file or directory") && (strings.Contains(message, "auth.json") || strings.Contains(message, "codex-home"))
+}
+
+func isCodexAuthFailure(provider, output string, err error) bool {
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return false
+	}
+	return isProviderAuthFailure(provider, output, err)
+}
+
+func isProviderUsageLimit(provider, output string, err error) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "codex" && provider != "claude" {
+		return false
+	}
+	message := strings.ToLower(output)
+	if err != nil {
+		message += "\n" + strings.ToLower(err.Error())
+	}
+	for _, marker := range []string{"usage limit", "rate limit", "too many requests"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func providerUsageLimitMessage(provider string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return "Claude CLI account usage limit reached; retry after quota resets or switch to another authenticated account."
+	}
+	return "Codex CLI account usage limit reached; retry after quota resets or switch to another authenticated account."
+}
+
+func providerAuthPath(provider, codexPath, claudePath string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return strings.TrimSpace(codexPath)
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return strings.TrimSpace(claudePath)
+	}
+	return ""
+}
+
+func authRequiredMessage(provider string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return claudeAuthRequiredMessage
+	}
+	return codexAuthRequiredMessage
+}
+
+func appendAuthMount(containerArgs []string, imageIndex int, source, target string, file bool) ([]string, int, error) {
+	source = filepath.Clean(strings.TrimSpace(source))
+	if !filepath.IsAbs(source) || strings.ContainsAny(source, "\x00\r\n,") {
+		kind := "directory"
+		if file {
+			kind = "file"
+		}
+		return nil, 0, fmt.Errorf("provider auth %s path must be an absolute host path without commas", kind)
+	}
+	withAuth := make([]string, 0, len(containerArgs)+3)
+	withAuth = append(withAuth, containerArgs[:imageIndex]...)
+	withAuth = append(withAuth, "--mount", "type=bind,source="+source+",target="+target+",readonly")
+	withAuth = append(withAuth, containerArgs[imageIndex:]...)
+	return withAuth, len(withAuth) - 1, nil
 }
 
 func gitEnvironment(explicitToken string) []string {
@@ -322,7 +588,11 @@ func containerArguments(job Job) ([]string, error) {
 	if network == "" {
 		network = "none"
 	}
-	args := []string{"run", "--rm", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", "--network", network, "--workdir", "/workspace", "--volume", job.Workspace + ":/workspace:rw", "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m"}
+	workspaceMode := "rw"
+	if job.ReadOnly {
+		workspaceMode = "ro"
+	}
+	args := []string{"run", "--rm", "--name", dockerContainerName(job.ID), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", "--network", network, "--workdir", "/workspace", "--volume", job.Workspace + ":/workspace:" + workspaceMode, "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m"}
 	if job.CPULimit != "" {
 		args = append(args, "--cpus", job.CPULimit)
 	}
@@ -334,6 +604,11 @@ func containerArguments(job Job) ([]string, error) {
 	}
 	args = append(args, image)
 	return args, nil
+}
+
+func dockerContainerName(jobID string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(jobID)))
+	return fmt.Sprintf("forgeflow-agent-%x", digest[:8])
 }
 
 func redactSecrets(value string, environment []string) string {

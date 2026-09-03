@@ -34,7 +34,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const runColumns = `id::text, organization_id::text, project_id::text, work_item_id::text, COALESCE(repository_id::text,''), agent_provider, agent_name, model, base_sha, branch, status, started_at, finished_at, COALESCE(commit_sha,''), COALESCE(pull_request_id::text,''), COALESCE(result,'{}'), COALESCE(metadata,'{}'), COALESCE(execution_policy,'{}'), approval_fingerprint_version, COALESCE(approval_fingerprint,''), last_heartbeat_at, COALESCE(interruption_reason,''), created_at`
+const runColumns = `id::text, organization_id::text, project_id::text, work_item_id::text, COALESCE(repository_id::text,''), agent_provider, agent_name, model, reasoning_effort, base_sha, branch, status, started_at, finished_at, COALESCE(commit_sha,''), COALESCE(pull_request_id::text,''), COALESCE(result,'{}'), COALESCE(metadata,'{}'), COALESCE(execution_policy,'{}'), approval_fingerprint_version, COALESCE(approval_fingerprint,''), last_heartbeat_at, COALESCE(interruption_reason,''), created_at`
 
 const runSelect = `SELECT ` + runColumns + ` FROM agent_runs`
 
@@ -54,6 +54,7 @@ func scanRun(row rowScanner) (Run, error) {
 		&result.AgentProvider,
 		&result.AgentName,
 		&result.Model,
+		&result.ReasoningEffort,
 		&result.BaseSHA,
 		&result.Branch,
 		&result.Status,
@@ -114,7 +115,7 @@ func (s *PostgresStore) Create(ctx context.Context, organizationID string, input
 		return Run{}, fmt.Errorf("compute AgentRun approval fingerprint: %w", err)
 	}
 	metadata := []byte(`{}`)
-	row := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO agent_runs (id, organization_id, project_id, work_item_id, repository_id, agent_provider, agent_name, model, base_sha, branch, status, metadata, approval_fingerprint_version, approval_fingerprint, execution_policy) VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+runColumns, id, organizationID, input.ProjectID, input.WorkItemID, input.RepositoryID, input.AgentProvider, input.AgentName, input.Model, input.BaseSHA, input.Branch, Queued, metadata, ApprovalFingerprintVersion, fingerprint, executionPolicy)
+	row := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `INSERT INTO agent_runs (id, organization_id, project_id, work_item_id, repository_id, agent_provider, agent_name, model, reasoning_effort, base_sha, branch, status, metadata, approval_fingerprint_version, approval_fingerprint, execution_policy) VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING `+runColumns, id, organizationID, input.ProjectID, input.WorkItemID, input.RepositoryID, input.AgentProvider, input.AgentName, input.Model, input.ReasoningEffort, input.BaseSHA, input.Branch, Queued, metadata, ApprovalFingerprintVersion, fingerprint, executionPolicy)
 	result, err := scanRun(row)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "agent_runs_one_active_code_change") {
@@ -423,7 +424,7 @@ func (s *MemoryStore) Create(_ context.Context, organizationID string, input Cre
 	if err != nil {
 		return Run{}, err
 	}
-	item := Run{ID: id, OrganizationID: organizationID, ProjectID: input.ProjectID, WorkItemID: input.WorkItemID, RepositoryID: input.RepositoryID, AgentProvider: input.AgentProvider, AgentName: input.AgentName, Model: input.Model, BaseSHA: input.BaseSHA, Branch: input.Branch, ExecutionInputs: normalizeExecutionInputs(input.ExecutionInputs), ExecutionPolicy: normalizeMap(input.ExecutionPolicy), ApprovalFingerprintVersion: ApprovalFingerprintVersion, ApprovalFingerprint: fingerprint, Status: Queued, Metadata: map[string]any{}, CreatedAt: time.Now().UTC()}
+	item := Run{ID: id, OrganizationID: organizationID, ProjectID: input.ProjectID, WorkItemID: input.WorkItemID, RepositoryID: input.RepositoryID, AgentProvider: input.AgentProvider, AgentName: input.AgentName, Model: input.Model, ReasoningEffort: input.ReasoningEffort, BaseSHA: input.BaseSHA, Branch: input.Branch, ExecutionInputs: normalizeExecutionInputs(input.ExecutionInputs), ExecutionPolicy: normalizeMap(input.ExecutionPolicy), ApprovalFingerprintVersion: ApprovalFingerprintVersion, ApprovalFingerprint: fingerprint, Status: Queued, Metadata: map[string]any{}, CreatedAt: time.Now().UTC()}
 	s.runs[id] = item
 	return item, nil
 }

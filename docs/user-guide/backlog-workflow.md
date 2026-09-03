@@ -352,7 +352,7 @@ Nếu manager hoặc lead chỉ có mô tả ban đầu, không cần dùng MCP.
 3. Nhập hiện tượng, mong đợi, thực tế và bối cảnh vào **Mô tả yêu cầu**.
 4. Bấm **Tạo bản nháp bằng AI server**.
 
-Forgeflow sẽ tạo work item và autonomous run trong project. Run có thể dừng ở `WAITING_SPEC_REVIEW`; mở work item, bổ sung hoặc chỉnh Definition, đánh dấu các field đã human verify rồi bấm **Resume**. Đây là quality gate bắt buộc: agent server không tự biến mô tả chưa kiểm chứng thành specification đã đúng.
+Forgeflow sẽ tạo work item và autonomous run trong project. Server chạy Codex/Claude ở chế độ intake chỉ đọc để cấu trúc mô tả thành bản nháp chưa xác minh, sau đó run dừng ở `WAITING_SPEC_REVIEW`; mở work item, bổ sung hoặc chỉnh Definition, đánh dấu các field đã human verify rồi bấm **Resume**. Đây là quality gate bắt buộc: agent server không tự biến mô tả chưa kiểm chứng thành specification đã đúng.
 
 Nếu đã có một work item và objective đủ rõ, có thể dùng luồng trực tiếp:
 

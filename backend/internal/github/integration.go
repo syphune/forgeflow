@@ -1159,6 +1159,8 @@ type goAppClient struct {
 	httpClient   *http.Client
 }
 
+const githubAPIRequestTimeout = 20 * time.Second
+
 func NewAppClient(config AppConfig) (AppClient, error) {
 	if !config.Configured() {
 		return nil, nil
@@ -1168,7 +1170,7 @@ func NewAppClient(config AppConfig) (AppClient, error) {
 		return nil, fmt.Errorf("parse GitHub App private key: %w", err)
 	}
 	transport := newGitHubAppTransport(http.DefaultTransport, config.ID, 0, privateKey)
-	return &goAppClient{appID: config.ID, privateKey: privateKey, appClient: gh.NewClient(&http.Client{Transport: transport}), clientID: strings.TrimSpace(config.ClientID), clientSecret: config.ClientSecret, httpClient: &http.Client{Timeout: 10 * time.Second}}, nil
+	return &goAppClient{appID: config.ID, privateKey: privateKey, appClient: gh.NewClient(&http.Client{Transport: transport, Timeout: githubAPIRequestTimeout}), clientID: strings.TrimSpace(config.ClientID), clientSecret: config.ClientSecret, httpClient: &http.Client{Timeout: 10 * time.Second}}, nil
 }
 
 func (c *goAppClient) Installation(ctx context.Context, installationID int64) (RemoteInstallation, error) {
@@ -1181,7 +1183,7 @@ func (c *goAppClient) Installation(ctx context.Context, installationID int64) (R
 
 func (c *goAppClient) Repositories(ctx context.Context, installationID int64) ([]RemoteRepository, error) {
 	transport := newGitHubAppTransport(http.DefaultTransport, c.appID, installationID, c.privateKey)
-	client := gh.NewClient(&http.Client{Transport: transport})
+	client := gh.NewClient(&http.Client{Transport: transport, Timeout: githubAPIRequestTimeout})
 	result := make([]RemoteRepository, 0)
 	for page := 1; page <= 100; page++ {
 		response, apiResponse, err := client.Apps.ListRepos(ctx, &gh.ListOptions{Page: page, PerPage: 100})
@@ -1200,7 +1202,7 @@ func (c *goAppClient) Repositories(ctx context.Context, installationID int64) ([
 
 func (c *goAppClient) installationClient(installationID int64) (*gh.Client, error) {
 	transport := newGitHubAppTransport(http.DefaultTransport, c.appID, installationID, c.privateKey)
-	return gh.NewClient(&http.Client{Transport: transport}), nil
+	return gh.NewClient(&http.Client{Transport: transport, Timeout: githubAPIRequestTimeout}), nil
 }
 
 func (c *goAppClient) InstallationToken(ctx context.Context, installationID int64) (string, time.Time, error) {

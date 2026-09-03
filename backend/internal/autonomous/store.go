@@ -29,7 +29,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
 const runColumns = `id::text, organization_id::text, project_id::text, work_item_id::text,
-COALESCE(repository_id::text,''), COALESCE(base_sha,''), COALESCE(branch,''), objective, agent_provider, agent_name, COALESCE(model,''),
+COALESCE(repository_id::text,''), COALESCE(base_sha,''), COALESCE(branch,''), objective, agent_provider, agent_name, COALESCE(model,''), COALESCE(reasoning_effort,''),
 COALESCE(target_environment,''), policy, status, phase, COALESCE(gate,''), attempt, max_attempts,
 COALESCE(current_agent_run_id::text,''), COALESCE(pull_request_id::text,''), COALESCE(commit_sha,''),
 unresolved_positions, COALESCE(last_error,''), version, created_at, updated_at, finished_at`
@@ -38,7 +38,7 @@ func scanRun(row interface{ Scan(...any) error }) (Run, error) {
 	var run Run
 	var policyJSON []byte
 	if err := row.Scan(&run.ID, &run.OrganizationID, &run.ProjectID, &run.WorkItemID, &run.RepositoryID, &run.BaseSHA, &run.Branch,
-		&run.Objective, &run.AgentProvider, &run.AgentName, &run.Model, &run.TargetEnvironment, &policyJSON,
+		&run.Objective, &run.AgentProvider, &run.AgentName, &run.Model, &run.ReasoningEffort, &run.TargetEnvironment, &policyJSON,
 		&run.Status, &run.Phase, &run.Gate, &run.Attempt, &run.MaxAttempts, &run.CurrentAgentRunID,
 		&run.PullRequestID, &run.CommitSHA, &run.UnresolvedPositions, &run.LastError, &run.Version,
 		&run.CreatedAt, &run.UpdatedAt, &run.FinishedAt); err != nil {
@@ -66,11 +66,11 @@ func (s *PostgresStore) Create(ctx context.Context, organizationID string, input
 	status, phase, gate := initialState(input)
 	row := platformdb.ExecutorFrom(ctx, s.pool).QueryRow(ctx, `
 INSERT INTO autonomous_runs
- (id, organization_id, project_id, work_item_id, repository_id, base_sha, branch, objective, agent_provider, agent_name, model,
+ (id, organization_id, project_id, work_item_id, repository_id, base_sha, branch, objective, agent_provider, agent_name, model, reasoning_effort,
   target_environment, policy, status, phase, gate, attempt, max_attempts, unresolved_positions)
-VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,''),0,$17,$18)
+VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NULLIF($17,''),0,$18,$19)
 RETURNING `+runColumns, id, organizationID, input.ProjectID, input.WorkItemID, input.RepositoryID,
-		strings.TrimSpace(input.BaseSHA), strings.TrimSpace(input.Branch), strings.TrimSpace(input.Objective), strings.ToLower(strings.TrimSpace(input.AgentProvider)), strings.TrimSpace(input.AgentName), strings.TrimSpace(input.Model), strings.TrimSpace(input.TargetEnvironment), policyJSON, status, phase, gate, policy.MaxAttempts, input.TestCasePositions)
+		strings.TrimSpace(input.BaseSHA), strings.TrimSpace(input.Branch), strings.TrimSpace(input.Objective), strings.ToLower(strings.TrimSpace(input.AgentProvider)), strings.TrimSpace(input.AgentName), strings.TrimSpace(input.Model), strings.TrimSpace(input.ReasoningEffort), strings.TrimSpace(input.TargetEnvironment), policyJSON, status, phase, gate, policy.MaxAttempts, input.TestCasePositions)
 	return scanRun(row)
 }
 
@@ -167,7 +167,7 @@ func (s *MemoryStore) Create(_ context.Context, organizationID string, input Sta
 	}
 	status, phase, gate := initialState(input)
 	now := time.Now().UTC()
-	run := Run{ID: id, OrganizationID: organizationID, ProjectID: input.ProjectID, WorkItemID: input.WorkItemID, RepositoryID: input.RepositoryID, BaseSHA: strings.TrimSpace(input.BaseSHA), Branch: strings.TrimSpace(input.Branch), Objective: strings.TrimSpace(input.Objective), AgentProvider: strings.ToLower(strings.TrimSpace(input.AgentProvider)), AgentName: strings.TrimSpace(input.AgentName), Model: strings.TrimSpace(input.Model), TargetEnvironment: strings.TrimSpace(input.TargetEnvironment), Policy: policy.Normalize(), Status: status, Phase: phase, Gate: gate, MaxAttempts: policy.MaxAttempts, UnresolvedPositions: append([]int(nil), input.TestCasePositions...), Version: 1, CreatedAt: now, UpdatedAt: now}
+	run := Run{ID: id, OrganizationID: organizationID, ProjectID: input.ProjectID, WorkItemID: input.WorkItemID, RepositoryID: input.RepositoryID, BaseSHA: strings.TrimSpace(input.BaseSHA), Branch: strings.TrimSpace(input.Branch), Objective: strings.TrimSpace(input.Objective), AgentProvider: strings.ToLower(strings.TrimSpace(input.AgentProvider)), AgentName: strings.TrimSpace(input.AgentName), Model: strings.TrimSpace(input.Model), ReasoningEffort: strings.TrimSpace(input.ReasoningEffort), TargetEnvironment: strings.TrimSpace(input.TargetEnvironment), Policy: policy.Normalize(), Status: status, Phase: phase, Gate: gate, MaxAttempts: policy.MaxAttempts, UnresolvedPositions: append([]int(nil), input.TestCasePositions...), Version: 1, CreatedAt: now, UpdatedAt: now}
 	s.runs[id] = run
 	return run, nil
 }

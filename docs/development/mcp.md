@@ -69,11 +69,26 @@ The Desktop Runner stores the selected local project path and execution fields i
 
 ## Autonomous workflow
 
-The MCP catalog includes `autonomous.start`, `autonomous.get`, `autonomous.resume`, `autonomous.retry`, `autonomous.cancel`, `autonomous.add_feedback`, and `autonomous.record_test_results`. A manager or leader can provide one objective; Forgeflow creates or reuses the work item, waits for the specification quality gate, starts the configured Codex/Claude runner, and preserves the workflow gate and feedback.
+The MCP catalog includes `autonomous.start`, `autonomous.get`, `autonomous.resume`, `autonomous.retry`, `autonomous.cancel`, `autonomous.add_feedback`, and `autonomous.record_test_results`. A manager or leader can provide one objective; Forgeflow creates or reuses the work item, first runs the selected Codex/Claude provider in read-only intake mode when the definition is incomplete, stores its output as an unverified draft, then pauses at `WAITING_SPEC_REVIEW`. Only after human review does the normal code-execution runner start.
 
 The retry contract is incremental: the server stores `PASS`, `FAIL`, `BLOCKED`, and `NOT_RUN` per regression position. Reviewers add a note and retry only `unresolved_positions`; passed cases are not reset. Specification verification and production deployment approval are human-only capabilities.
 
-For a Docker server runner, keep provider credentials in the runner environment and use a separate long random token between worker and runner:
+For the Docker server runner, authenticate Codex with the local ChatGPT login rather than an OpenAI API key. Set the absolute host path to Codex's `auth.json`, then use the lifecycle commands from the repository root:
+
+```sh
+# .env.local
+FORGEFLOW_CODEX_AUTH_HOST_PATH=/Users/you/.codex/auth.json
+```
+
+```sh
+make codex-status
+make codex-login       # first login or expired session
+make codex-switch      # logout, then device-code login for another account
+```
+
+The runner mounts that file read-only for each job. If a Codex session expires, the run is recorded as `FAILED` with an `AUTH_REQUIRED` result; log in again and retry it from the workflow panel. No API key is sent in the job payload.
+
+For the worker/runner boundary, keep a separate long random token:
 
 ```sh
 FORGEFLOW_RUNNER_URL=http://runner:8090 \
@@ -83,9 +98,18 @@ docker compose --env-file .env.local --profile autonomous -f infra/compose.dev.y
 
 The runner image is an execution boundary, not a trust boundary for unreviewed repository content: deploy it with a dedicated workspace volume, least-privilege credentials, network restrictions, and no production secrets. Docker jobs use a read-only root filesystem, non-root UID, dropped capabilities, `no-new-privileges`, a `noexec,nosuid` temporary filesystem, CPU/RAM/PID/timeout limits, and bounded/redacted output. Network defaults to `none`; use `bridge` only behind an egress firewall/allowlist when the provider API needs outbound access. Use a version-pinned image or digest, never `latest`.
 
+Server-side Codex and Claude jobs connect to Forgeflow MCP automatically after the provider is signed in from Project Settings. Docker Compose supplies the local endpoint; the worker issues a short-lived, project/run-scoped credential using the internal runner secret. No MCP PAT or OpenAI API key is pasted into the UI or job.
+
+```sh
+# Required only when the runner job needs provider/MCP egress.
+FORGEFLOW_RUNNER_NETWORK_MODE=bridge
+```
+
+The worker pins `project_id` and `agent_run_id` to each autonomous run, passes the short-lived credential only over the internal worker-to-runner request, and injects it into the job without serializing it into the job JSON or command arguments. Codex receives a temporary environment file; Claude receives a temporary MCP config file. `FORGEFLOW_RUNNER_MCP_URL` is only an override for non-default deployments, and `FORGEFLOW_RUNNER_MCP_TOKEN` remains a legacy/manual override. Restart `make dev` after changing `.env.local`.
+
 When the worker and Docker daemon do not share the same host path, set `FORGEFLOW_RUNNER_DOCKER_WORKSPACE_ROOT` to the absolute path visible to the daemon. The `/var/run/docker.sock` mount gives the runner near-root control of the host; keep it on a dedicated host/VM or replace it with a rootless/isolated daemon for a production pilot. Production release approval and verification remain human-only, and the runner has no production secrets by default.
 
-When the autonomous worker dispatches a linked repository, the runner validates the HTTPS clone URL, clones it into the per-run workspace, checks out the requested base SHA/branch, and reuses that workspace on retries. Public GitHub repositories work without extra configuration; private repositories require a short-lived `FORGEFLOW_GIT_TOKEN` mounted only in the runner. The worker never sends provider or Git credentials in the job payload.
+For read-only autonomous intake and specification review, the runner does not clone the linked repository: Codex/Claude reads Git content through the project-scoped Forgeflow MCP connection. After human approval, a code-execution run may clone the linked repository into its isolated per-run workspace, check out the requested base SHA/branch, and reuse that workspace on retries. Public GitHub repositories work without extra configuration; with the GitHub App configured, the worker issues a short-lived installation credential for private repositories and sends it only in the internal runner header. The worker never sends provider or Git credentials in the job payload.
 
 ## Claude Desktop
 

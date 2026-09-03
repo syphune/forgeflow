@@ -78,6 +78,7 @@ type createRequest struct {
 	AgentProvider   string          `json:"agent_provider"`
 	AgentName       string          `json:"agent_name"`
 	Model           string          `json:"model"`
+	ReasoningEffort string          `json:"reasoning_effort"`
 	BaseSHA         string          `json:"base_sha"`
 	Branch          string          `json:"branch"`
 	ExecutionInputs ExecutionInputs `json:"execution_inputs"`
@@ -112,6 +113,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		AgentProvider:   in.AgentProvider,
 		AgentName:       in.AgentName,
 		Model:           in.Model,
+		ReasoningEffort: in.ReasoningEffort,
 		BaseSHA:         in.BaseSHA,
 		Branch:          in.Branch,
 		ExecutionInputs: in.ExecutionInputs,

@@ -66,6 +66,33 @@ func TestApprovalFingerprintCanonicalizesInputsAndPolicy(t *testing.T) {
 	}
 }
 
+func TestApprovalFingerprintIncludesReasoningEffortAndKeepsLegacyVersion(t *testing.T) {
+	base := CreateInput{RepositoryID: "repo", BaseSHA: "base", Model: "gpt-5.6-sol"}
+	withoutEffort, err := approvalFingerprint(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withEffort, err := approvalFingerprint(CreateInput{RepositoryID: "repo", BaseSHA: "base", Model: "gpt-5.6-sol", ReasoningEffort: "high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutEffort == withEffort {
+		t.Fatal("changing reasoning effort did not change the fingerprint")
+	}
+
+	legacy, err := approvalFingerprintVersioned(base, legacyApprovalFingerprintVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyWithEffort, err := approvalFingerprintVersioned(CreateInput{RepositoryID: "repo", BaseSHA: "base", Model: "gpt-5.6-sol", ReasoningEffort: "high"}, legacyApprovalFingerprintVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy != legacyWithEffort {
+		t.Fatal("legacy fingerprint unexpectedly includes reasoning effort")
+	}
+}
+
 func TestAgentRunHeartbeatDeadlineBoundary(t *testing.T) {
 	now := time.Unix(10_000, 0).UTC()
 	store := NewMemoryStore()
