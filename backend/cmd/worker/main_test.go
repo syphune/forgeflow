@@ -142,6 +142,52 @@ func TestEventHandlerRecordsRunnerDispatchErrorWithoutHeartbeatTimeout(t *testin
 	}
 }
 
+func TestEventHandlerResolvesRejectedImpactReview(t *testing.T) {
+	ctx := context.Background()
+	actor := identity.Actor{Type: "system", ID: "worker", OrganizationID: "org-1", Capabilities: map[string]bool{"*": true}}
+	autonomousStore := autonomous.NewMemoryStore()
+	workflow, err := autonomousStore.Create(ctx, "org-1", autonomous.StartInput{ProjectID: "project-1", WorkItemID: "item-1", RepositoryID: "repo-1", Objective: "Update the shared repository"}, autonomous.DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	autonomousService := autonomous.NewService(autonomousStore, nil, nil, nil)
+	if _, err := autonomousService.HandleAgentRunResult(ctx, actor, "project-1", workflow.ID, runner.Result{ImpactReviewRequired: true}); err != nil {
+		t.Fatal(err)
+	}
+	agentRuns := agentrun.NewService(agentrun.NewMemoryStore(), nil)
+	run, err := agentRuns.Create(ctx, actor, agentrun.CreateInput{ProjectID: "project-1", WorkItemID: "item-1", RepositoryID: "repo-1", AgentProvider: "codex", AgentName: "codex", ExecutionPolicy: map[string]any{"workflow_id": workflow.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []agentrun.Status{agentrun.Preparing, agentrun.Planning, agentrun.Investigating, agentrun.Implementing, agentrun.Testing, agentrun.Reviewing} {
+		if _, err := agentRuns.Transition(ctx, actor, "project-1", run.ID, status); err != nil {
+			t.Fatalf("transition to %s: %v", status, err)
+		}
+	}
+	handler := eventHandler{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), agentRuns: agentRuns, autonomous: autonomousService}
+	event := outbox.Event{ID: "impact-rejected", OrganizationID: "org-1", EventType: "agent_run.impact_rejected", AggregateType: "agent_run", AggregateID: run.ID, Payload: map[string]any{"project_id": "project-1"}}
+	if err := handler.Handle(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	finished, _, _, err := agentRuns.Get(ctx, actor, "project-1", run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status != agentrun.Failed {
+		t.Fatalf("rejected child AgentRun status = %s, want FAILED", finished.Status)
+	}
+	updated, feedback, err := autonomousService.Get(ctx, actor, "project-1", workflow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != autonomous.StatusFailed || updated.Gate != autonomous.GateImpactReview || len(feedback) != 1 {
+		t.Fatalf("rejected workflow = status %s gate %s feedback %d", updated.Status, updated.Gate, len(feedback))
+	}
+	if err := handler.Handle(ctx, event); err != nil {
+		t.Fatalf("duplicate rejection event: %v", err)
+	}
+}
+
 func TestMCPURLForProjectPinsAutonomousProject(t *testing.T) {
 	got, err := mcpURLForProject("https://forgeflow.example/api/v1/mcp?transport=streamable", "project-1", false)
 	if err != nil {

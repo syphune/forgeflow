@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/forgeflow/forgeflow/backend/internal/audit"
+	"github.com/forgeflow/forgeflow/backend/internal/impact"
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/httpapi"
@@ -23,6 +24,7 @@ type Service struct {
 	recorder    MutationRecorder
 	transaction TransactionRunner
 	now         func() time.Time
+	impact      impact.Checker
 }
 
 type MutationRecorder struct {
@@ -44,6 +46,7 @@ type Options struct {
 	Recorder    MutationRecorder
 	Transaction TransactionRunner
 	Now         func() time.Time
+	Impact      impact.Checker
 }
 
 func NewService(store Store, workItems *workitem.Service, options ...Options) *Service {
@@ -57,8 +60,10 @@ func NewService(store Store, workItems *workitem.Service, options ...Options) *S
 	if configured.Now == nil {
 		configured.Now = func() time.Time { return time.Now().UTC() }
 	}
-	return &Service{store: store, workItems: workItems, recorder: configured.Recorder, transaction: configured.Transaction, now: configured.Now}
+	return &Service{store: store, workItems: workItems, recorder: configured.Recorder, transaction: configured.Transaction, now: configured.Now, impact: configured.Impact}
 }
+
+func (s *Service) SetImpactChecker(checker impact.Checker) { s.impact = checker }
 
 func (s *Service) Create(ctx context.Context, actor identity.Actor, input CreateInput) (Run, error) {
 	return s.create(ctx, actor, input, false)
@@ -115,6 +120,11 @@ func (s *Service) create(ctx context.Context, actor identity.Actor, input Create
 		result, err = s.store.Create(txCtx, actor.OrganizationID, input)
 		if err != nil {
 			return err
+		}
+		if s.impact != nil && !intake {
+			if _, err := s.impact.EnsureReport(txCtx, impact.Subject{OrganizationID: result.OrganizationID, ProjectID: result.ProjectID, WorkItemID: result.WorkItemID, RepositoryID: result.RepositoryID, AgentRunID: result.ID, BaseSHA: result.BaseSHA, Branch: result.Branch, SpecificationVersion: result.ExecutionInputs.SpecificationVersion, GateMode: impactGateMode(result.ExecutionPolicy)}); err != nil {
+				return err
+			}
 		}
 		if err := s.record(txCtx, actor, "create", result.ID, nil, result); err != nil {
 			return err
@@ -793,4 +803,13 @@ func autonomousExecution(policy map[string]any) bool {
 func autonomousIntakeExecution(policy map[string]any) bool {
 	value, ok := policy["mode"].(string)
 	return ok && strings.EqualFold(strings.TrimSpace(value), "autonomous-intake")
+}
+
+func impactGateMode(policy map[string]any) string {
+	value, _ := policy["impact_gate_mode"].(string)
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value == impact.GateRequired {
+		return impact.GateRequired
+	}
+	return impact.GateReportOnly
 }

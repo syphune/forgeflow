@@ -9,6 +9,7 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/agentrun"
 	"github.com/forgeflow/forgeflow/backend/internal/autonomous"
 	githubintegration "github.com/forgeflow/forgeflow/backend/internal/github"
+	"github.com/forgeflow/forgeflow/backend/internal/impact"
 	"github.com/forgeflow/forgeflow/backend/internal/planning"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
 	"github.com/forgeflow/forgeflow/backend/internal/specification"
@@ -22,6 +23,10 @@ func NewHTTPHandler(workItems *workitem.Service, spec *specification.Service, ag
 }
 
 func NewHTTPHandlerWithAutonomous(workItems *workitem.Service, spec *specification.Service, agentRuns *agentrun.Service, autonomousService *autonomous.Service, tenantService *tenant.Service, planningService *planning.Service, maxBody int64, githubServices ...*githubintegration.Service) http.Handler {
+	return NewHTTPHandlerWithAutonomousAndImpact(workItems, spec, agentRuns, autonomousService, tenantService, planningService, nil, maxBody, githubServices...)
+}
+
+func NewHTTPHandlerWithAutonomousAndImpact(workItems *workitem.Service, spec *specification.Service, agentRuns *agentrun.Service, autonomousService *autonomous.Service, tenantService *tenant.Service, planningService *planning.Service, impactService *impact.Service, maxBody int64, githubServices ...*githubintegration.Service) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return sdk.NewStreamableHTTPHandler(func(r *http.Request) *sdk.Server {
 		actor, ok := identity.ActorFromContext(r.Context())
@@ -36,6 +41,7 @@ func NewHTTPHandlerWithAutonomous(workItems *workitem.Service, spec *specificati
 		server := sdk.NewServer(&sdk.Implementation{Name: "forgeflow-mcp", Version: "0.1.0"}, &sdk.ServerOptions{Logger: logger, Instructions: instructions})
 		adapter := NewServiceAdapter(actor, workItems, spec, tenantService, planningService, mcpProjectID(r), agentRuns)
 		adapter.SetAutonomous(autonomousService)
+		adapter.SetImpact(impactService)
 		if len(githubServices) > 0 {
 			adapter.GitHub = githubServices[0]
 		}

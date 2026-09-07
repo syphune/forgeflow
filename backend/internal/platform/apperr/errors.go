@@ -16,6 +16,7 @@ const (
 	CodeSpecificationNotReady = "SPECIFICATION_NOT_READY"
 	CodeStaleSpecification    = "STALE_SPECIFICATION"
 	CodeAICannotVerify        = "AI_CANNOT_VERIFY"
+	CodeImpactReviewRequired  = "IMPACT_REVIEW_REQUIRED"
 	CodeInternal              = "INTERNAL"
 )
 

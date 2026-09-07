@@ -11,6 +11,7 @@ const (
 	StatusQueued               Status = "QUEUED"
 	StatusIntake               Status = "INTAKE"
 	StatusWaitingSpecReview    Status = "WAITING_SPEC_REVIEW"
+	StatusWaitingImpactReview  Status = "WAITING_IMPACT_REVIEW"
 	StatusReadyForExecution    Status = "READY_FOR_EXECUTION"
 	StatusExecuting            Status = "EXECUTING"
 	StatusWaitingPRReview      Status = "WAITING_PR_REVIEW"
@@ -46,6 +47,7 @@ const (
 	GateDeployment        Gate = "DEPLOYMENT_APPROVAL"
 	GateHumanVerification Gate = "HUMAN_VERIFICATION"
 	GateClarification     Gate = "CLARIFICATION"
+	GateImpactReview      Gate = "IMPACT_REVIEW"
 )
 
 type Policy struct {
@@ -60,6 +62,7 @@ type Policy struct {
 	NetworkPolicy    map[string]any `json:"network_policy,omitempty"`
 	MCPPermissions   []string       `json:"mcp_permissions,omitempty"`
 	ExecutionProfile string         `json:"execution_profile,omitempty"`
+	ImpactGateMode   string         `json:"impact_gate_mode,omitempty"`
 }
 
 func DefaultPolicy() Policy {
@@ -78,6 +81,7 @@ func DefaultPolicy() Policy {
 			"repository.get_symbol", "repository.related_files", "repository.related_commits", "repository.related_pull_requests",
 		},
 		ExecutionProfile: "default",
+		ImpactGateMode:   "REPORT_ONLY",
 	}
 }
 
@@ -100,6 +104,10 @@ func (p Policy) Normalize() Policy {
 	p.ExecutionProfile = strings.TrimSpace(p.ExecutionProfile)
 	if p.ExecutionProfile == "" {
 		p.ExecutionProfile = defaults.ExecutionProfile
+	}
+	p.ImpactGateMode = strings.ToUpper(strings.TrimSpace(p.ImpactGateMode))
+	if p.ImpactGateMode != "REQUIRED" {
+		p.ImpactGateMode = defaults.ImpactGateMode
 	}
 	if len(p.Providers) == 0 {
 		p.Providers = append([]string(nil), defaults.Providers...)

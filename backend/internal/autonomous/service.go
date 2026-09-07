@@ -11,6 +11,7 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/agentrun"
 	"github.com/forgeflow/forgeflow/backend/internal/audit"
 	"github.com/forgeflow/forgeflow/backend/internal/branchplan"
+	"github.com/forgeflow/forgeflow/backend/internal/impact"
 	"github.com/forgeflow/forgeflow/backend/internal/outbox"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/httpapi"
@@ -382,13 +383,24 @@ func (s *Service) HandleAgentRunResult(ctx context.Context, actor identity.Actor
 	}
 	var updated Run
 	err = s.transaction.WithinTransaction(ctx, func(txCtx context.Context) error {
+		if result.ImpactReviewRequired {
+			var updateErr error
+			updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: StatusWaitingImpactReview, Phase: PhaseImplementation, Gate: GateImpactReview, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: "impact approval is required before publishing changes"})
+			return updateErr
+		}
 		if strings.TrimSpace(result.Error) != "" {
-			if _, feedbackErr := s.AddFeedback(txCtx, actor, projectID, id, FeedbackInput{Source: "agent", Note: result.Error, Severity: "error"}); feedbackErr != nil {
+			source := "agent"
+			if result.ErrorCode == runner.ErrorCodeImpactRejected {
+				source = "system"
+			}
+			if _, feedbackErr := s.AddFeedback(txCtx, actor, projectID, id, FeedbackInput{Source: source, Note: result.Error, Severity: "error"}); feedbackErr != nil {
 				return feedbackErr
 			}
 			status, phase, gate := StatusWaitingTestFeedback, PhaseTesting, GateTestFeedback
 			if result.ErrorCode == runner.ErrorCodeAuthRequired {
 				status, phase, gate = StatusFailed, PhaseImplementation, GateRunner
+			} else if result.ErrorCode == runner.ErrorCodeImpactRejected {
+				status, phase, gate = StatusFailed, PhaseImplementation, GateImpactReview
 			}
 			var updateErr error
 			updated, updateErr = s.updateState(txCtx, actor, run, StateUpdate{Status: status, Phase: phase, Gate: gate, CurrentAgentRunID: run.CurrentAgentRunID, Attempt: run.Attempt, UnresolvedPositions: run.UnresolvedPositions, LastError: result.Error})
@@ -549,7 +561,7 @@ func (s *Service) startAttempt(ctx context.Context, actor identity.Actor, run Ru
 			AgentProvider: run.AgentProvider, AgentName: run.AgentName, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 			BaseSHA: baseSHA, Branch: branch,
 			ExecutionInputs: agentrun.ExecutionInputs{Prompt: run.Objective + "\n\nAutonomous workflow attempt " + fmt.Sprint(run.Attempt+1) + ". Preserve passing test cases and fix only unresolved feedback.", TestCasePositions: positions, MCPPermissions: policy.MCPPermissions, ExecutionProfile: policy.ExecutionProfile, NetworkPolicy: policy.NetworkPolicy},
-			ExecutionPolicy: map[string]any{"autonomous": true, "workflow_id": run.ID, "runtime": policy.Runtime, "max_attempts": policy.MaxAttempts, "push_branch": policy.AutoCreatePR},
+			ExecutionPolicy: map[string]any{"autonomous": true, "workflow_id": run.ID, "runtime": policy.Runtime, "max_attempts": policy.MaxAttempts, "push_branch": policy.AutoCreatePR, "impact_gate_mode": impactGateMode(policy.ImpactGateMode), "created_by": actor.ID},
 		})
 		if createErr != nil {
 			return createErr
@@ -667,6 +679,13 @@ func providerAllowed(policy Policy, provider string) bool {
 
 func systemActor(organizationID string) identity.Actor {
 	return identity.Actor{Type: "system", ID: "autonomous-orchestrator", OrganizationID: organizationID, Source: "worker", Capabilities: map[string]bool{"*": true}}
+}
+
+func impactGateMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), impact.GateRequired) {
+		return impact.GateRequired
+	}
+	return impact.GateReportOnly
 }
 
 func require(actor identity.Actor, capability string) error {

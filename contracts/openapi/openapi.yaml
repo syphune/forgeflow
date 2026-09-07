@@ -1356,6 +1356,18 @@ paths:
                   run: { $ref: "#/components/schemas/AgentRun" }
                   steps: { type: array, items: { $ref: "#/components/schemas/AgentRunStep" } }
                   artifacts: { type: array, items: { $ref: "#/components/schemas/AgentRunArtifact" } }
+  /agent-runs/{id}/impact-report:
+    get:
+      operationId: getAgentRunImpactReport
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/ProjectIDHeader" }
+      responses:
+        "200":
+          description: Cross-project impact report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImpactReport" }
   /agent-runs/{id}/approve:
     post:
       operationId: approveAgentRun
@@ -2052,6 +2064,69 @@ paths:
       operationId: unlinkProjectRepository
       summary: Unlink a GitHub repository from a project
       responses: { "204": { description: Repository unlinked } }
+  /projects/{id}/repositories/{repository_id}/impact-scope:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listRepositoryImpactScopes
+      responses:
+        "200":
+          description: Project ownership mappings for a shared repository
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RepositoryProjectScope" } }
+    put:
+      operationId: saveRepositoryImpactScope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImpactScopeRequest" }
+      responses:
+        "200":
+          description: Verified project ownership mapping
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositoryProjectScope" }
+  /projects/{id}/repositories/{repository_id}/impact-scope/infer:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: repository_id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: inferRepositoryImpactScope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImpactScopeRequest" }
+      responses:
+        "201":
+          description: Unverified inferred ownership proposal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RepositoryProjectScope" }
+  /projects/{id}/agent-runs/{run_id}/impact-approval:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: run_id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: approveAgentRunImpact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            { schema: { $ref: "#/components/schemas/ImpactApprovalRequest" } }
+      responses:
+        "200":
+          description: Updated cross-project impact report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImpactReport" }
   /projects/{id}/repositories/{repository_id}/context:
     parameters:
       - {
@@ -3727,6 +3802,84 @@ components:
     AgentRunStatus:
       type: string
       enum: [INTERRUPTED, QUEUED, PREPARING, PLANNING, INVESTIGATING, IMPLEMENTING, TESTING, REVIEWING, COMPLETED, FAILED, CANCELLED]
+    ImpactProjectSummary:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string }
+        display_name: { type: string }
+    RepositoryProjectScope:
+      type: object
+      required: [id, organization_id, project_id, repository_id, provenance, status, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        path_prefixes: { type: array, items: { type: string, maxLength: 1024 }, maxItems: 100 }
+        modules: { type: array, items: { type: string, maxLength: 256 }, maxItems: 100 }
+        impact_summary: { type: string, maxLength: 4000 }
+        provenance: { type: string, enum: [HUMAN_VERIFIED, AI_INFERRED, SYSTEM_DERIVED] }
+        status: { type: string, enum: [PROPOSED, ACTIVE, REJECTED] }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_by: { type: string }
+        verified_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ImpactScopeRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        path_prefixes: { type: array, items: { type: string, maxLength: 1024 }, maxItems: 100 }
+        modules: { type: array, items: { type: string, maxLength: 256 }, maxItems: 100 }
+        impact_summary: { type: string, maxLength: 4000 }
+    ImpactAffectedProject:
+      type: object
+      required: [project, reason, requires_approval]
+      properties:
+        project: { $ref: "#/components/schemas/ImpactProjectSummary" }
+        path_prefixes: { type: array, items: { type: string } }
+        modules: { type: array, items: { type: string } }
+        reason: { type: string }
+        requires_approval: { type: boolean }
+    ImpactApproval:
+      type: object
+      required: [report_id, affected_project_id, decision, approver_id, created_at]
+      properties:
+        report_id: { type: string, format: uuid }
+        affected_project_id: { type: string, format: uuid }
+        decision: { type: string, enum: [APPROVED, REJECTED] }
+        approver_id: { type: string }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+    ImpactReport:
+      type: object
+      required: [id, organization_id, agent_run_id, project_id, repository_id, report_version, input_hash, affected_projects, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        agent_run_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        repository_id: { type: string, format: uuid }
+        report_version: { type: integer, format: int64, minimum: 1 }
+        input_hash: { type: string, maxLength: 128 }
+        base_sha: { type: string }
+        diff_hash: { type: string }
+        changed_paths: { type: array, items: { type: string, maxLength: 1024 }, maxItems: 500 }
+        affected_projects: { type: array, items: { $ref: "#/components/schemas/ImpactAffectedProject" }, maxItems: 11 }
+        unknown_impact: { type: boolean }
+        truncated: { type: boolean }
+        status: { type: string, enum: [PENDING, APPROVED, REJECTED, STALE] }
+        approvals: { type: array, items: { $ref: "#/components/schemas/ImpactApproval" } }
+        created_at: { type: string, format: date-time }
+    ImpactApprovalRequest:
+      type: object
+      required: [report_version, decision]
+      properties:
+        report_version: { type: integer, format: int64, minimum: 1 }
+        decision: { type: string, enum: [APPROVED, REJECTED] }
+        note: { type: string, maxLength: 4000 }
     AgentRunResultRequest:
       type: object
       properties:
@@ -3763,6 +3916,7 @@ components:
         network_policy: { type: object, additionalProperties: true }
         mcp_permissions: { type: array, items: { type: string, maxLength: 256 }, maxItems: 200 }
         execution_profile: { type: string, maxLength: 200 }
+        impact_gate_mode: { type: string, enum: [REPORT_ONLY, REQUIRED] }
     AutonomousStartRequest:
       type: object
       required: [objective]
@@ -3802,9 +3956,9 @@ components:
         policy: { $ref: "#/components/schemas/AutonomousPolicy" }
         status:
           type: string
-          enum: [QUEUED, INTAKE, WAITING_SPEC_REVIEW, READY_FOR_EXECUTION, EXECUTING, WAITING_PR_REVIEW, WAITING_TEST_FEEDBACK, FIXING, WAITING_DEPLOY_APPROVAL, DEPLOYING, COMPLETED, PAUSED, FAILED, CANCELLED]
+          enum: [QUEUED, INTAKE, WAITING_SPEC_REVIEW, WAITING_IMPACT_REVIEW, READY_FOR_EXECUTION, EXECUTING, WAITING_PR_REVIEW, WAITING_TEST_FEEDBACK, FIXING, WAITING_DEPLOY_APPROVAL, DEPLOYING, COMPLETED, PAUSED, FAILED, CANCELLED]
         phase: { type: string, enum: [INTAKE, SPECIFICATION, IMPLEMENTATION, TESTING, PULL_REQUEST, DEPLOYMENT] }
-        gate: { type: string, enum: ["", SPECIFICATION_REVIEW, RUNNER_AVAILABLE, PULL_REQUEST_REVIEW, TEST_FEEDBACK, DEPLOYMENT_APPROVAL, HUMAN_VERIFICATION, CLARIFICATION] }
+        gate: { type: string, enum: ["", SPECIFICATION_REVIEW, RUNNER_AVAILABLE, IMPACT_REVIEW, PULL_REQUEST_REVIEW, TEST_FEEDBACK, DEPLOYMENT_APPROVAL, HUMAN_VERIFICATION, CLARIFICATION] }
         attempt: { type: integer, minimum: 0 }
         max_attempts: { type: integer, minimum: 1 }
         current_agent_run_id: { type: string, format: uuid }

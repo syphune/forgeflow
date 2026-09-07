@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GitHubInstallation, GitHubRepository, RepositoryContext } from "@forgeflow/api-client";
+import type { GitHubInstallation, GitHubRepository, RepositoryContext, RepositorySearchMatch } from "@forgeflow/api-client";
 import { translate as t } from "@forgeflow/ui";
 import { apiErrorMessage, browserAPI, isRepositoryEmptyError } from "../app/api";
 
@@ -20,6 +20,10 @@ export function RepositoryPage({ projectID, basePath }: Props) {
   const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
   const [selectedRepositoryID, setSelectedRepositoryID] = useState("");
   const [context, setContext] = useState<RepositoryContext | null>(null);
+  const [repositorySearchQuery, setRepositorySearchQuery] = useState("");
+  const [repositorySearchResults, setRepositorySearchResults] = useState<RepositorySearchMatch[]>([]);
+  const [repositorySearchBusy, setRepositorySearchBusy] = useState(false);
+  const [repositorySearchSubmitted, setRepositorySearchSubmitted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [contextLoading, setContextLoading] = useState(false);
   const [repositoryEmpty, setRepositoryEmpty] = useState(false);
@@ -27,6 +31,7 @@ export function RepositoryPage({ projectID, basePath }: Props) {
   const [busyRepositoryID, setBusyRepositoryID] = useState("");
   const [error, setError] = useState("");
   const [contextError, setContextError] = useState("");
+  const [repositorySearchError, setRepositorySearchError] = useState("");
   const [message, setMessage] = useState("");
   const installURL = `${apiBase}/api/v1/integrations/github/install/start`;
 
@@ -59,6 +64,12 @@ export function RepositoryPage({ projectID, basePath }: Props) {
 
   async function selectRepository(repository: GitHubRepository) {
     if (!repository.linked || contextLoading) return;
+    if (selectedRepositoryID !== repository.id) {
+      setRepositorySearchQuery("");
+      setRepositorySearchResults([]);
+      setRepositorySearchSubmitted(false);
+      setRepositorySearchError("");
+    }
     setSelectedRepositoryID(repository.id);
     setContextError("");
     setRepositoryEmpty(false);
@@ -73,6 +84,23 @@ export function RepositoryPage({ projectID, basePath }: Props) {
       setContextError(apiErrorMessage(cause));
     } finally {
       setContextLoading(false);
+    }
+  }
+
+  async function searchRepositoryCode() {
+    const query = repositorySearchQuery.trim();
+    if (!selectedRepositoryID || !query || repositorySearchBusy) return;
+    setRepositorySearchBusy(true);
+    setRepositorySearchSubmitted(true);
+    setRepositorySearchError("");
+    try {
+      const response = await client.searchRepository(projectID, selectedRepositoryID, query);
+      setRepositorySearchResults(response.items ?? []);
+    } catch (cause) {
+      setRepositorySearchResults([]);
+      setRepositorySearchError(apiErrorMessage(cause));
+    } finally {
+      setRepositorySearchBusy(false);
     }
   }
 
@@ -109,6 +137,10 @@ export function RepositoryPage({ projectID, basePath }: Props) {
         setSelectedRepositoryID("");
         setContext(null);
         setRepositoryEmpty(false);
+        setRepositorySearchQuery("");
+        setRepositorySearchResults([]);
+        setRepositorySearchSubmitted(false);
+        setRepositorySearchError("");
       }
       setMessage(t(linked ? "repo.link-message" : "repo.unlink-message", { name: repositoryName(repository) }));
     } catch (cause) {
@@ -128,6 +160,6 @@ export function RepositoryPage({ projectID, basePath }: Props) {
     {!loading && !installations.length ? <div className="app-v2-empty"><strong>{t("repo.install-first")}</strong><p>{t("repo.install-help")}</p><a className="button button-secondary" href={installURL}>{t("repo.install")}</a></div> : null}
     {!loading && installations.length > 0 && !repositories.length ? <div className="app-v2-empty"><strong>{t("repo.none")}</strong><p>{t("repo.none-help")}</p><a className="button button-secondary" href={installURL}>{t("repo.update-selection")}</a></div> : null}
     {loading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /><p>{t("repo.checking")}</p></div> : null}
-    {!loading && repositories.length ? <div className="app-v2-repository-layout"><div className="app-v2-repository-grid" aria-label={t("repo.github-repositories")}>{repositories.map((repository) => <article className={`app-v2-surface-card app-v2-repository-card ${repository.linked ? "is-linked" : ""}`} key={repository.id}><div className="app-v2-repository-card-heading"><div><span className="app-v2-key">{repository.installation_account || "GitHub"}</span><h3>{repositoryName(repository)}</h3></div><span className={`app-v2-readiness ${repository.linked ? "is-ready" : ""}`}>{repository.linked ? t("repo.linked") : t("repo.available")}</span></div><p>{t("repo.default-branch")} <strong>{repository.default_branch || t("repo.unknown")}</strong></p><div className="app-v2-repository-actions"><button className="button button-secondary" type="button" onClick={() => void toggleRepository(repository)} disabled={busyRepositoryID === repository.id}>{busyRepositoryID === repository.id ? t("work.saving") : repository.linked ? t("repo.unlink") : t("repo.link")}</button>{repository.linked ? <button className="button button-quiet" type="button" onClick={() => void selectRepository(repository)} disabled={contextLoading}>{selectedRepositoryID === repository.id && contextLoading ? t("repo.loading-context") : t("repo.view-context")}</button> : null}</div></article>)}</div><div className="app-v2-surface-card app-v2-repository-context" aria-live="polite"><h3>{t("repo.engineering-context")}</h3>{contextLoading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /></div> : null}{contextError ? <div className="app-v2-error-panel" role="alert"><span>{contextError}</span><div><button type="button" onClick={() => { const repository = repositories.find((item) => item.id === selectedRepositoryID); if (repository) void selectRepository(repository); }}>{t("app.retry")}</button>{repositoryEmpty ? <button className="button button-secondary" type="button" onClick={() => void initializeRepository()} disabled={repositoryInitializing}>{repositoryInitializing ? t("repo.initializing-repository") : t("repo.initialize-empty-repository")}</button> : null}</div></div> : null}{!contextLoading && !contextError && !context ? <p className="app-v2-muted">{t("repo.select-linked")}</p> : null}{context ? <><div className="app-v2-repository-context-title"><strong>{repositoryName(context.repository)}</strong><span>{context.repository.default_branch || t("repo.unknown-default-branch")}</span></div><div className="app-v2-context-stats"><div><strong>{context.branches.length}</strong><span>{t("repo.branch")}</span></div><div><strong>{context.pull_requests.length}</strong><span>{t("repo.pull-request")}</span></div><div><strong>{context.ci_runs.length}</strong><span>{t("repo.ci-run")}</span></div></div><Link className="button button-secondary" href={`${basePath}/backlog`}>{t("repo.open-backlog")}</Link></> : null}</div></div> : null}
+    {!loading && repositories.length ? <div className="app-v2-repository-layout"><div className="app-v2-repository-grid" aria-label={t("repo.github-repositories")}>{repositories.map((repository) => <article className={`app-v2-surface-card app-v2-repository-card ${repository.linked ? "is-linked" : ""}`} key={repository.id}><div className="app-v2-repository-card-heading"><div><span className="app-v2-key">{repository.installation_account || "GitHub"}</span><h3>{repositoryName(repository)}</h3></div><span className={`app-v2-readiness ${repository.linked ? "is-ready" : ""}`}>{repository.linked ? t("repo.linked") : t("repo.available")}</span></div><p>{t("repo.default-branch")} <strong>{repository.default_branch || t("repo.unknown")}</strong></p><div className="app-v2-repository-actions"><button className="button button-secondary" type="button" onClick={() => void toggleRepository(repository)} disabled={busyRepositoryID === repository.id}>{busyRepositoryID === repository.id ? t("work.saving") : repository.linked ? t("repo.unlink") : t("repo.link")}</button>{repository.linked ? <button className="button button-quiet" type="button" onClick={() => void selectRepository(repository)} disabled={contextLoading}>{selectedRepositoryID === repository.id && contextLoading ? t("repo.loading-context") : t("repo.view-context")}</button> : null}</div></article>)}</div><div className="app-v2-surface-card app-v2-repository-context" aria-live="polite"><h3>{t("repo.engineering-context")}</h3>{contextLoading ? <div className="app-v2-loading" aria-busy="true" role="status"><span /><span /><span /></div> : null}{contextError ? <div className="app-v2-error-panel" role="alert"><span>{contextError}</span><div><button type="button" onClick={() => { const repository = repositories.find((item) => item.id === selectedRepositoryID); if (repository) void selectRepository(repository); }}>{t("app.retry")}</button>{repositoryEmpty ? <button className="button button-secondary" type="button" onClick={() => void initializeRepository()} disabled={repositoryInitializing}>{repositoryInitializing ? t("repo.initializing-repository") : t("repo.initialize-empty-repository")}</button> : null}</div></div> : null}{!contextLoading && !contextError && !context ? <p className="app-v2-muted">{t("repo.select-linked")}</p> : null}{context ? <><div className="app-v2-repository-context-title"><strong>{repositoryName(context.repository)}</strong><span>{context.repository.default_branch || t("repo.unknown-default-branch")}</span></div><div className="app-v2-context-stats"><div><strong>{context.branches.length}</strong><span>{t("repo.branch")}</span></div><div><strong>{context.pull_requests.length}</strong><span>{t("repo.pull-request")}</span></div><div><strong>{context.ci_runs.length}</strong><span>{t("repo.ci-run")}</span></div></div><Link className="button button-secondary" href={`${basePath}/backlog`}>{t("repo.open-backlog")}</Link><form className="repository-search-form" onSubmit={(event) => { event.preventDefault(); void searchRepositoryCode(); }}><input type="search" aria-label={t("repo.search-code")} value={repositorySearchQuery} onChange={(event) => { setRepositorySearchQuery(event.target.value); setRepositorySearchSubmitted(false); setRepositorySearchError(""); }} placeholder={t("repo.search-placeholder")} maxLength={256} /><button className="button button-secondary" type="submit" disabled={repositorySearchBusy || !repositorySearchQuery.trim()}>{repositorySearchBusy ? t("repo.searching-code") : t("repo.search-code")}</button></form>{repositorySearchError ? <p className="app-v2-inline-error" role="alert">{repositorySearchError}</p> : null}{repositorySearchSubmitted && !repositorySearchBusy && !repositorySearchResults.length && !repositorySearchError ? <p className="app-v2-muted">{t("repo.search-empty")}</p> : null}{repositorySearchResults.length ? <div className="repository-search-results" aria-label={t("repo.search-results")}>{repositorySearchResults.map((match, index) => <div className="repository-file-row" key={`${match.path}-${match.line}-${index}`}><span>{match.path}</span><small>{t("repo.search-match", { line: match.line, snippet: match.snippet })}</small></div>)}</div> : null}</> : null}</div></div> : null}
   </section>;
 }

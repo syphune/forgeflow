@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +52,11 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 	if err := job.Validate(); err != nil {
 		return Result{}, err
 	}
-	if e.UseDocker && providerAuthPath(job.Provider, e.CodexAuthHostPath, e.ClaudeAuthHostPath) == "" {
+	operation := strings.ToLower(strings.TrimSpace(job.Operation))
+	if operation == "" {
+		operation = "execute"
+	}
+	if operation == "execute" && e.UseDocker && providerAuthPath(job.Provider, e.CodexAuthHostPath, e.ClaudeAuthHostPath) == "" {
 		result := Result{ExitCode: 1, Error: authRequiredMessage(job.Provider), ErrorCode: ErrorCodeAuthRequired}
 		if emit != nil {
 			_ = emit(Event{JobID: job.ID, Type: EventFailed, ExitCode: result.ExitCode, Error: result.Error, ErrorCode: result.ErrorCode})
@@ -72,20 +78,21 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 	if err := e.prepareWorkspace(ctx, job); err != nil {
 		return Result{}, err
 	}
-	preparedJob, cleanupMCP, err := e.prepareMCP(job)
-	if err != nil {
-		return Result{}, err
+	cleanupMCP := func() {}
+	var err error
+	if operation == "execute" {
+		var preparedJob Job
+		preparedJob, cleanupMCP, err = e.prepareMCP(job)
+		if err != nil {
+			return Result{}, err
+		}
+		job = preparedJob
 	}
 	defer cleanupMCP()
-	job = preparedJob
 	if emit != nil {
 		if err := emit(Event{JobID: job.ID, Type: EventStarted}); err != nil {
 			return Result{}, err
 		}
-	}
-	name, args, err := providerCommand(job)
-	if err != nil {
-		return Result{}, err
 	}
 	output := &limitedBuffer{limit: maxOutputBytes}
 	environment := safeEnvironment(job.Environment, job.Provider)
@@ -94,10 +101,16 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 		redactionEnvironment = append(redactionEnvironment, "FORGEFLOW_MCP_TOKEN="+job.MCPToken)
 		environment = append(environment, "FORGEFLOW_MCP_TOKEN="+job.MCPToken)
 	}
-	if e.UseDocker {
-		err = e.runInContainer(ctx, job, name, args, output, environment)
-	} else {
-		err = e.Commands.Run(ctx, job.Workspace, name, args, output, output, environment)
+	if operation == "execute" {
+		name, args, commandErr := providerCommand(job)
+		if commandErr != nil {
+			return Result{}, commandErr
+		}
+		if e.UseDocker {
+			err = e.runInContainer(ctx, job, name, args, output, environment)
+		} else {
+			err = e.Commands.Run(ctx, job.Workspace, name, args, output, output, environment)
+		}
 	}
 	result := Result{ExitCode: 0, Output: redactSecrets(output.String(), redactionEnvironment)}
 	if err != nil {
@@ -117,6 +130,17 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 		}
 		return result, err
 	}
+	changedPaths, diffHash, diffErr := e.collectChanges(ctx, job)
+	if diffErr != nil {
+		result.ExitCode = 1
+		result.Error = redactSecrets(boundedError(diffErr), append(redactionEnvironment, "GIT_TOKEN="+job.GitToken))
+		if emit != nil {
+			_ = emit(Event{JobID: job.ID, Type: EventFailed, Text: result.Output, ExitCode: result.ExitCode, Error: result.Error})
+		}
+		return result, diffErr
+	}
+	result.ChangedPaths = changedPaths
+	result.DiffHash = diffHash
 	if job.PushBranch {
 		if err := e.finalizeAndPush(ctx, job); err != nil {
 			result.ExitCode = 1
@@ -133,6 +157,109 @@ func (e Executor) Execute(ctx context.Context, job Job, emit func(Event) error) 
 		}
 	}
 	return result, nil
+}
+
+func (e Executor) collectChanges(ctx context.Context, job Job) ([]string, string, error) {
+	operation := strings.ToLower(strings.TrimSpace(job.Operation))
+	if job.ReadOnly || (operation != "publish" && !job.CollectChanges && !job.PushBranch) || (operation != "publish" && strings.TrimSpace(job.RepositoryURL) == "" && !job.PushBranch) {
+		return nil, "", nil
+	}
+	status, err := e.runGitOutputWithToken(ctx, "inspect agent changes", job.Workspace, []string{"-C", job.Workspace, "status", "--porcelain=v1", "--untracked-files=all", "-z"}, job.GitToken)
+	if err != nil {
+		return nil, "", err
+	}
+	paths := make([]string, 0)
+	addPath := func(raw string) error {
+		path := strings.ReplaceAll(raw, "\\", "/")
+		if path == "" {
+			return nil
+		}
+		if strings.ContainsAny(path, "\x00\r\n") || filepath.IsAbs(path) || path == "." || path == ".." || strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || strings.Contains(path, "/../") {
+			return fmt.Errorf("agent changed path is unsafe")
+		}
+		paths = append(paths, path)
+		return nil
+	}
+	entries := strings.Split(status, "\x00")
+	for index := 0; index < len(entries); index++ {
+		entry := entries[index]
+		if len(entry) < 4 {
+			continue
+		}
+		statusCode, path := entry[:2], entry[3:]
+		if err := addPath(path); err != nil {
+			return nil, "", err
+		}
+		if strings.ContainsAny(statusCode, "RC") && index+1 < len(entries) && entries[index+1] != "" {
+			index++
+			if err := addPath(entries[index]); err != nil {
+				return nil, "", err
+			}
+		}
+	}
+	sort.Strings(paths)
+	unique := paths[:0]
+	for _, path := range paths {
+		if len(unique) == 0 || unique[len(unique)-1] != path {
+			unique = append(unique, path)
+		}
+	}
+	hash := sha256.New()
+	var total int64
+	for _, path := range unique {
+		_, _ = io.WriteString(hash, path)
+		_, _ = hash.Write([]byte{0})
+		full := filepath.Join(job.Workspace, filepath.FromSlash(path))
+		info, statErr := os.Lstat(full)
+		if os.IsNotExist(statErr) {
+			_, _ = io.WriteString(hash, "DELETED")
+			_, _ = hash.Write([]byte{0})
+			continue
+		}
+		if statErr != nil {
+			return nil, "", fmt.Errorf("inspect changed path: %w", statErr)
+		}
+		if info.IsDir() {
+			_, _ = io.WriteString(hash, "DIRECTORY")
+			_, _ = hash.Write([]byte{0})
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, readlinkErr := os.Readlink(full)
+			if readlinkErr != nil {
+				return nil, "", fmt.Errorf("read changed symlink: %w", readlinkErr)
+			}
+			_, _ = io.WriteString(hash, "SYMLINK:")
+			_, _ = io.WriteString(hash, target)
+			_, _ = hash.Write([]byte{0})
+			continue
+		}
+		const maxFileBytes = 16 << 20
+		if info.Size() > maxFileBytes {
+			return nil, "", fmt.Errorf("changed file %q exceeds the impact hashing limit", path)
+		}
+		file, openErr := os.Open(full)
+		if openErr != nil {
+			return nil, "", fmt.Errorf("open changed path: %w", openErr)
+		}
+		read, copyErr := io.CopyN(hash, file, maxFileBytes+1)
+		closeErr := file.Close()
+		if copyErr != nil && copyErr != io.EOF {
+			return nil, "", fmt.Errorf("hash changed path: %w", copyErr)
+		}
+		if closeErr != nil {
+			return nil, "", fmt.Errorf("close changed path: %w", closeErr)
+		}
+		if read > maxFileBytes {
+			return nil, "", fmt.Errorf("changed file %q exceeds the impact hashing limit", path)
+		}
+		total += read
+		if total > 64<<20 {
+			return nil, "", fmt.Errorf("changed files exceed the impact hashing limit")
+		}
+		_, _ = hash.Write([]byte{0})
+	}
+	return unique, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (e Executor) finalizeAndPush(ctx context.Context, job Job) error {

@@ -10,6 +10,7 @@ import (
 	"github.com/forgeflow/forgeflow/backend/internal/agentrun"
 	"github.com/forgeflow/forgeflow/backend/internal/autonomous"
 	githubintegration "github.com/forgeflow/forgeflow/backend/internal/github"
+	"github.com/forgeflow/forgeflow/backend/internal/impact"
 	"github.com/forgeflow/forgeflow/backend/internal/planning"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/apperr"
 	"github.com/forgeflow/forgeflow/backend/internal/platform/identity"
@@ -27,12 +28,15 @@ type ServiceAdapter struct {
 	AgentRuns  *agentrun.Service
 	Autonomous *autonomous.Service
 	GitHub     *githubintegration.Service
+	Impact     *impact.Service
 	ProjectID  string
 }
 
 func (a *ServiceAdapter) SetAutonomous(service *autonomous.Service) {
 	a.Autonomous = service
 }
+
+func (a *ServiceAdapter) SetImpact(service *impact.Service) { a.Impact = service }
 
 func NewServiceAdapter(actor identity.Actor, workItems *workitem.Service, spec *specification.Service, tenantService *tenant.Service, planningService *planning.Service, projectID string, agentRuns ...*agentrun.Service) *ServiceAdapter {
 	var runs *agentrun.Service
@@ -165,6 +169,13 @@ func (a ServiceAdapter) Call(ctx context.Context, name string, args map[string]a
 						result["knowledge_documents"] = documents
 					}
 				}
+			}
+			if a.Impact != nil && repositoryID != "" {
+				impactContext, impactErr := a.Impact.ContextForActor(ctx, a.Actor, scope.ProjectID, repositoryID)
+				if impactErr != nil {
+					return nil, impactErr
+				}
+				result["cross_project_impact"] = impactContext
 			}
 		}
 		return result, nil

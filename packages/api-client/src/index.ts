@@ -55,6 +55,10 @@ export type AgentRunStatus = components["schemas"]["AgentRunStatus"];
 export type AgentRunExecutionInputs = components["schemas"]["AgentRunExecutionInputs"];
 export type CreateAgentRunRequest = components["schemas"]["CreateAgentRunRequest"];
 export type AgentRunTestResultsRequest = components["schemas"]["AgentRunTestResultsRequest"];
+export type ImpactReport = components["schemas"]["ImpactReport"];
+export type RepositoryProjectScope = components["schemas"]["RepositoryProjectScope"];
+export type ImpactScopeRequest = components["schemas"]["ImpactScopeRequest"];
+export type ImpactApprovalRequest = components["schemas"]["ImpactApprovalRequest"];
 export type AutonomousPolicy = components["schemas"]["AutonomousPolicy"];
 export type AutonomousRun = components["schemas"]["AutonomousRun"];
 export type AutonomousStartRequest = components["schemas"]["AutonomousStartRequest"];
@@ -471,6 +475,14 @@ export class APIClient {
     return this.request(`/agent-runs/${encodeURIComponent(id)}`, { projectID });
   }
 
+  getAgentRunImpactReport(id: string, projectID: string): Promise<ImpactReport> {
+    return this.request<ImpactReport>(`/agent-runs/${encodeURIComponent(id)}/impact-report`, { projectID });
+  }
+
+  approveAgentRunImpact(runID: string, affectedProjectID: string, input: ImpactApprovalRequest): Promise<ImpactReport> {
+    return this.request<ImpactReport>(`/projects/${encodeURIComponent(affectedProjectID)}/agent-runs/${encodeURIComponent(runID)}/impact-approval`, { method: "POST", projectID: affectedProjectID, body: input });
+  }
+
   approveAgentRun(id: string, projectID?: string): Promise<AgentRun> {
     return this.request<AgentRun>(`/agent-runs/${encodeURIComponent(id)}/approve`, { method: "POST", projectID });
   }
@@ -624,6 +636,18 @@ export class APIClient {
     return this.request<{ items: GitHubRepository[] }>(`/projects/${encodeURIComponent(projectID)}/repositories`, { projectID });
   }
 
+  listRepositoryImpactScopes(projectID: string, repositoryID: string): Promise<{ items: RepositoryProjectScope[] }> {
+    return this.request<{ items: RepositoryProjectScope[] }>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/impact-scope`, { projectID });
+  }
+
+  saveRepositoryImpactScope(projectID: string, repositoryID: string, input: ImpactScopeRequest): Promise<RepositoryProjectScope> {
+    return this.request<RepositoryProjectScope>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/impact-scope`, { method: "PUT", projectID, body: input });
+  }
+
+  inferRepositoryImpactScope(projectID: string, repositoryID: string, input: ImpactScopeRequest): Promise<RepositoryProjectScope> {
+    return this.request<RepositoryProjectScope>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/impact-scope/infer`, { method: "POST", projectID, body: input });
+  }
+
   linkProjectRepository(projectID: string, repositoryID: string): Promise<void> {
     return this.request<void>(`/projects/${encodeURIComponent(projectID)}/repositories`, { method: "POST", projectID, body: { repository_id: repositoryID } });
   }
@@ -634,6 +658,11 @@ export class APIClient {
 
   getRepositoryContext(projectID: string, repositoryID: string): Promise<RepositoryContext> {
     return this.request<RepositoryContext>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/context`, { projectID });
+  }
+
+  searchRepository(projectID: string, repositoryID: string, query: string, limit = 20): Promise<{ items: RepositorySearchMatch[] }> {
+    const params = new URLSearchParams({ q: query.trim(), limit: String(Math.min(Math.max(limit, 1), 50)) });
+    return this.request<{ items: RepositorySearchMatch[] }>(`/projects/${encodeURIComponent(projectID)}/repositories/${encodeURIComponent(repositoryID)}/search?${params.toString()}`, { projectID });
   }
 
   initializeRepository(projectID: string, repositoryID: string, idempotencyKey: string): Promise<RepositoryInitialization> {

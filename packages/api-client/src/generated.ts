@@ -1212,6 +1212,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agent-runs/{id}/impact-report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getAgentRunImpactReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agent-runs/{id}/approve": {
         parameters: {
             query?: never;
@@ -1886,6 +1902,63 @@ export interface paths {
         post?: never;
         /** Unlink a GitHub repository from a project */
         delete: operations["unlinkProjectRepository"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/repositories/{repository_id}/impact-scope": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        get: operations["listRepositoryImpactScopes"];
+        put: operations["saveRepositoryImpactScope"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/repositories/{repository_id}/impact-scope/infer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["inferRepositoryImpactScope"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/projects/{id}/agent-runs/{run_id}/impact-approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["approveAgentRunImpact"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3429,6 +3502,96 @@ export interface components {
         };
         /** @enum {string} */
         AgentRunStatus: "INTERRUPTED" | "QUEUED" | "PREPARING" | "PLANNING" | "INVESTIGATING" | "IMPLEMENTING" | "TESTING" | "REVIEWING" | "COMPLETED" | "FAILED" | "CANCELLED";
+        ImpactProjectSummary: {
+            /** Format: uuid */
+            id: string;
+            key?: string;
+            display_name?: string;
+        };
+        RepositoryProjectScope: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            organization_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            repository_id: string;
+            path_prefixes?: string[];
+            modules?: string[];
+            impact_summary?: string;
+            /** @enum {string} */
+            provenance: "HUMAN_VERIFIED" | "AI_INFERRED" | "SYSTEM_DERIVED";
+            /** @enum {string} */
+            status: "PROPOSED" | "ACTIVE" | "REJECTED";
+            /** Format: int64 */
+            version: number;
+            created_by?: string;
+            verified_by?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ImpactScopeRequest: {
+            /** Format: uuid */
+            id?: string;
+            path_prefixes?: string[];
+            modules?: string[];
+            impact_summary?: string;
+        };
+        ImpactAffectedProject: {
+            project: components["schemas"]["ImpactProjectSummary"];
+            path_prefixes?: string[];
+            modules?: string[];
+            reason: string;
+            requires_approval: boolean;
+        };
+        ImpactApproval: {
+            /** Format: uuid */
+            report_id: string;
+            /** Format: uuid */
+            affected_project_id: string;
+            /** @enum {string} */
+            decision: "APPROVED" | "REJECTED";
+            approver_id: string;
+            note?: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ImpactReport: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            organization_id: string;
+            /** Format: uuid */
+            agent_run_id: string;
+            /** Format: uuid */
+            project_id: string;
+            /** Format: uuid */
+            repository_id: string;
+            /** Format: int64 */
+            report_version: number;
+            input_hash: string;
+            base_sha?: string;
+            diff_hash?: string;
+            changed_paths?: string[];
+            affected_projects: components["schemas"]["ImpactAffectedProject"][];
+            unknown_impact?: boolean;
+            truncated?: boolean;
+            /** @enum {string} */
+            status: "PENDING" | "APPROVED" | "REJECTED" | "STALE";
+            approvals?: components["schemas"]["ImpactApproval"][];
+            /** Format: date-time */
+            created_at: string;
+        };
+        ImpactApprovalRequest: {
+            /** Format: int64 */
+            report_version: number;
+            /** @enum {string} */
+            decision: "APPROVED" | "REJECTED";
+            note?: string;
+        };
         AgentRunResultRequest: {
             commit_sha?: string;
             /** Format: uuid */
@@ -3468,6 +3631,8 @@ export interface components {
             };
             mcp_permissions: string[];
             execution_profile: string;
+            /** @enum {string} */
+            impact_gate_mode?: "REPORT_ONLY" | "REQUIRED";
         };
         AutonomousStartRequest: {
             /** Format: uuid */
@@ -3512,11 +3677,11 @@ export interface components {
             target_environment?: string;
             policy: components["schemas"]["AutonomousPolicy"];
             /** @enum {string} */
-            status: "QUEUED" | "INTAKE" | "WAITING_SPEC_REVIEW" | "READY_FOR_EXECUTION" | "EXECUTING" | "WAITING_PR_REVIEW" | "WAITING_TEST_FEEDBACK" | "FIXING" | "WAITING_DEPLOY_APPROVAL" | "DEPLOYING" | "COMPLETED" | "PAUSED" | "FAILED" | "CANCELLED";
+            status: "QUEUED" | "INTAKE" | "WAITING_SPEC_REVIEW" | "WAITING_IMPACT_REVIEW" | "READY_FOR_EXECUTION" | "EXECUTING" | "WAITING_PR_REVIEW" | "WAITING_TEST_FEEDBACK" | "FIXING" | "WAITING_DEPLOY_APPROVAL" | "DEPLOYING" | "COMPLETED" | "PAUSED" | "FAILED" | "CANCELLED";
             /** @enum {string} */
             phase: "INTAKE" | "SPECIFICATION" | "IMPLEMENTATION" | "TESTING" | "PULL_REQUEST" | "DEPLOYMENT";
             /** @enum {string} */
-            gate?: "" | "SPECIFICATION_REVIEW" | "RUNNER_AVAILABLE" | "PULL_REQUEST_REVIEW" | "TEST_FEEDBACK" | "DEPLOYMENT_APPROVAL" | "HUMAN_VERIFICATION" | "CLARIFICATION";
+            gate?: "" | "SPECIFICATION_REVIEW" | "RUNNER_AVAILABLE" | "IMPACT_REVIEW" | "PULL_REQUEST_REVIEW" | "TEST_FEEDBACK" | "DEPLOYMENT_APPROVAL" | "HUMAN_VERIFICATION" | "CLARIFICATION";
             attempt: number;
             max_attempts: number;
             /** Format: uuid */
@@ -6106,6 +6271,30 @@ export interface operations {
             };
         };
     };
+    getAgentRunImpactReport: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Project-ID": components["parameters"]["ProjectIDHeader"];
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cross-project impact report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImpactReport"];
+                };
+            };
+        };
+    };
     approveAgentRun: {
         parameters: {
             query?: never;
@@ -7218,6 +7407,112 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    listRepositoryImpactScopes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Project ownership mappings for a shared repository */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["RepositoryProjectScope"][];
+                    };
+                };
+            };
+        };
+    };
+    saveRepositoryImpactScope: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImpactScopeRequest"];
+            };
+        };
+        responses: {
+            /** @description Verified project ownership mapping */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepositoryProjectScope"];
+                };
+            };
+        };
+    };
+    inferRepositoryImpactScope: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                repository_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImpactScopeRequest"];
+            };
+        };
+        responses: {
+            /** @description Unverified inferred ownership proposal */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepositoryProjectScope"];
+                };
+            };
+        };
+    };
+    approveAgentRunImpact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImpactApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated cross-project impact report */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImpactReport"];
+                };
             };
         };
     };

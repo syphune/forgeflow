@@ -18,6 +18,8 @@ type Job struct {
 	Provider          string            `json:"provider"`
 	Model             string            `json:"model,omitempty"`
 	ReasoningEffort   string            `json:"reasoning_effort,omitempty"`
+	Operation         string            `json:"operation,omitempty"`
+	CollectChanges    bool              `json:"collect_changes,omitempty"`
 	Prompt            string            `json:"prompt"`
 	RepositoryURL     string            `json:"repository_url,omitempty"`
 	BaseSHA           string            `json:"base_sha,omitempty"`
@@ -64,18 +66,29 @@ type Event struct {
 }
 
 type Result struct {
-	ExitCode  int    `json:"exit_code"`
-	Output    string `json:"output,omitempty"`
-	Error     string `json:"error,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
+	ExitCode             int      `json:"exit_code"`
+	Output               string   `json:"output,omitempty"`
+	Error                string   `json:"error,omitempty"`
+	ErrorCode            string   `json:"error_code,omitempty"`
+	ChangedPaths         []string `json:"changed_paths,omitempty"`
+	DiffHash             string   `json:"diff_hash,omitempty"`
+	ImpactReviewRequired bool     `json:"impact_review_required,omitempty"`
 }
 
 const (
-	ErrorCodeAuthRequired = "AUTH_REQUIRED"
-	ErrorCodeUsageLimit   = "USAGE_LIMIT"
+	ErrorCodeAuthRequired   = "AUTH_REQUIRED"
+	ErrorCodeUsageLimit     = "USAGE_LIMIT"
+	ErrorCodeImpactRejected = "IMPACT_REJECTED"
 )
 
 func (j Job) Validate() error {
+	operation := strings.ToLower(strings.TrimSpace(j.Operation))
+	if operation == "" {
+		operation = "execute"
+	}
+	if operation != "execute" && operation != "publish" {
+		return fmt.Errorf("operation must be execute or publish")
+	}
 	j.Provider = strings.ToLower(strings.TrimSpace(j.Provider))
 	if j.ID == "" || j.AgentRunID == "" || j.AutonomousRunID == "" {
 		return fmt.Errorf("job id, autonomous_run_id and agent_run_id are required")
