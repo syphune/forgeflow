@@ -57,3 +57,18 @@ func TestMapGitHubRepositoryResponseErrorMapsMissingBranch(t *testing.T) {
 		t.Fatalf("mapped = %v, code = %s", mapped, apperr.From(mapped).Code)
 	}
 }
+
+func TestMapGitHubPullRequestResponseErrorMapsPermissionAndValidation(t *testing.T) {
+	for _, test := range []struct {
+		status int
+		code   string
+	}{
+		{status: http.StatusForbidden, code: apperr.CodeForbidden},
+		{status: http.StatusUnprocessableEntity, code: apperr.CodeInvalidArgument},
+	} {
+		mapped := mapGitHubPullRequestResponseError(&gh.Response{Response: &http.Response{StatusCode: test.status}}, errors.New("github request failed"))
+		if mapped == nil || apperr.From(mapped).Code != test.code {
+			t.Fatalf("status %d mapped = %v, code = %s", test.status, mapped, apperr.From(mapped).Code)
+		}
+	}
+}

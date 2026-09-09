@@ -119,6 +119,8 @@ type RepositoryContext struct {
 	CIRuns       []CIRun       `json:"ci_runs"`
 }
 
+const repositoryHistoryTimeout = 5 * time.Second
+
 type RemoteInstallation struct {
 	ID           int64
 	AppID        int64
@@ -702,21 +704,21 @@ func (s *Service) BranchPlanFindPullRequest(ctx context.Context, actor identity.
 	if err != nil {
 		return PullRequest{}, false, err
 	}
-	if history, ok := s.client.(HistoryClient); ok {
-		items, historyErr := history.RepositoryPullRequests(ctx, repository.InstallationID, repository.FullName)
-		if historyErr != nil {
-			return PullRequest{}, false, historyErr
-		}
-		for _, item := range items {
-			if item.HeadRef == head && item.BaseRef == base && strings.ToLower(item.State) == "open" {
-				return PullRequest{RepositoryID: repositoryID, Number: item.Number, State: item.State, HeadRef: item.HeadRef, BaseRef: item.BaseRef, URL: item.URL, UpdatedAt: item.UpdatedAt}, true, nil
-			}
-		}
-		return PullRequest{}, false, nil
-	}
 	items, err := s.store.ListPullRequests(ctx, actor.OrganizationID, repositoryID)
 	if err != nil {
 		return PullRequest{}, false, err
+	}
+	if history, ok := s.client.(HistoryClient); ok {
+		historyCtx, cancel := context.WithTimeout(ctx, repositoryHistoryTimeout)
+		defer cancel()
+		remoteItems, historyErr := history.RepositoryPullRequests(historyCtx, repository.InstallationID, repository.FullName)
+		if historyErr == nil {
+			for _, item := range remoteItems {
+				if item.HeadRef == head && item.BaseRef == base && strings.ToLower(item.State) == "open" {
+					return PullRequest{RepositoryID: repositoryID, Number: item.Number, State: item.State, HeadRef: item.HeadRef, BaseRef: item.BaseRef, URL: item.URL, UpdatedAt: item.UpdatedAt}, true, nil
+				}
+			}
+		}
 	}
 	for _, item := range items {
 		if item.HeadRef == head && (item.BaseRef == base || item.BaseRef == "") && strings.ToLower(item.State) == "open" {
@@ -791,8 +793,15 @@ func (s *Service) RepositoryContext(ctx context.Context, actor identity.Actor, p
 	if err != nil {
 		return RepositoryContext{}, err
 	}
+	ciRuns, err := s.store.ListCIRuns(ctx, actor.OrganizationID, repositoryID)
+	if err != nil {
+		return RepositoryContext{}, err
+	}
 	if historyClient, ok := s.client.(HistoryClient); ok {
-		remoteCommits, historyErr := historyClient.RepositoryCommits(ctx, repository.InstallationID, repository.FullName, repository.DefaultBranch)
+		// ponytail: live history gets a short budget and falls back to webhook data; move it to an async refresh when freshness becomes a product requirement.
+		historyCtx, cancel := context.WithTimeout(ctx, repositoryHistoryTimeout)
+		defer cancel()
+		remoteCommits, historyErr := historyClient.RepositoryCommits(historyCtx, repository.InstallationID, repository.FullName, repository.DefaultBranch)
 		if historyErr == nil {
 			commits = make([]Commit, 0, len(remoteCommits))
 			for _, remote := range remoteCommits {
@@ -804,7 +813,7 @@ func (s *Service) RepositoryContext(ctx context.Context, actor identity.Actor, p
 		} else if apperr.From(historyErr).Code == apperr.CodeRepositoryEmpty {
 			return RepositoryContext{}, historyErr
 		}
-		remotePullRequests, historyErr := historyClient.RepositoryPullRequests(ctx, repository.InstallationID, repository.FullName)
+		remotePullRequests, historyErr := historyClient.RepositoryPullRequests(historyCtx, repository.InstallationID, repository.FullName)
 		if historyErr == nil {
 			pullRequests = make([]PullRequest, 0, len(remotePullRequests))
 			for _, remote := range remotePullRequests {
@@ -814,10 +823,6 @@ func (s *Service) RepositoryContext(ctx context.Context, actor identity.Actor, p
 				pullRequests = append(pullRequests, PullRequest{RepositoryID: repositoryID, Number: remote.Number, Title: remote.Title, State: remote.State, Draft: remote.Draft, HeadSHA: remote.HeadSHA, HeadRef: remote.HeadRef, BaseRef: remote.BaseRef, Body: remote.Body, URL: remote.URL, AuthorLogin: remote.AuthorLogin, ChangedPaths: append([]string(nil), remote.ChangedPaths...), Merged: remote.Merged, UpdatedAt: remote.UpdatedAt})
 			}
 		}
-	}
-	ciRuns, err := s.store.ListCIRuns(ctx, actor.OrganizationID, repositoryID)
-	if err != nil {
-		return RepositoryContext{}, err
 	}
 	return RepositoryContext{Repository: repository, Branches: branches, Commits: commits, PullRequests: pullRequests, CIRuns: ciRuns}, nil
 }
@@ -1121,6 +1126,22 @@ func mapGitHubRepositoryResponseError(response *gh.Response, err error) error {
 	return mapGitHubRepositoryError(err)
 }
 
+func mapGitHubPullRequestResponseError(response *gh.Response, err error) error {
+	if response != nil && response.Response != nil {
+		switch response.Response.StatusCode {
+		case http.StatusForbidden:
+			return apperr.New(apperr.CodeForbidden, http.StatusForbidden, "GitHub App cannot create pull requests; grant Pull requests: write and update the installation", map[string]any{"permission": "pull_requests:write"})
+		case http.StatusNotFound:
+			return apperr.New(apperr.CodeNotFound, http.StatusNotFound, "GitHub repository or branch was not found or is not accessible", nil)
+		case http.StatusUnprocessableEntity:
+			return apperr.New(apperr.CodeInvalidArgument, http.StatusUnprocessableEntity, "GitHub rejected the pull request; check that both branches exist", nil)
+		case http.StatusTooManyRequests:
+			return apperr.New(apperr.CodeRateLimited, http.StatusTooManyRequests, "GitHub API rate limit exceeded; try again later", nil)
+		}
+	}
+	return mapGitHubRepositoryError(err)
+}
+
 func validateBranchRef(value, field string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 255 || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "/") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") {
@@ -1338,47 +1359,21 @@ func (c *goAppClient) RepositoryPullRequests(ctx context.Context, installationID
 	if err != nil {
 		return nil, err
 	}
-	result := make([]RemotePullRequest, 0)
-	for page := 1; page <= 100; page++ {
-		items, response, err := client.PullRequests.List(ctx, owner, repository, &gh.PullRequestListOptions{State: "all", ListOptions: gh.ListOptions{Page: page, PerPage: 100}})
-		if err != nil {
-			return nil, mapGitHubRepositoryError(err)
-		}
-		for _, item := range items {
-			if item == nil || item.GetNumber() <= 0 {
-				continue
-			}
-			head := item.GetHead()
-			changedPaths, pathErr := c.pullRequestChangedPaths(ctx, client, owner, repository, item.GetNumber())
-			if pathErr != nil {
-				return nil, pathErr
-			}
-			result = append(result, RemotePullRequest{Number: int64(item.GetNumber()), Title: item.GetTitle(), State: item.GetState(), Draft: item.GetDraft(), HeadSHA: head.GetSHA(), HeadRef: head.GetRef(), BaseRef: item.GetBase().GetRef(), Body: item.GetBody(), AuthorLogin: item.GetUser().GetLogin(), ChangedPaths: changedPaths, Merged: item.GetMerged(), URL: item.GetHTMLURL(), UpdatedAt: item.GetUpdatedAt().Time.UTC()})
-		}
-		if response == nil || response.NextPage == 0 {
-			return result, nil
-		}
+	// The repository context is an interactive read. Keep it to one bounded
+	// GitHub page; webhook projections remain the source for complete history.
+	items, _, err := client.PullRequests.List(ctx, owner, repository, &gh.PullRequestListOptions{State: "all", ListOptions: gh.ListOptions{PerPage: 100}})
+	if err != nil {
+		return nil, mapGitHubRepositoryError(err)
 	}
-	return nil, fmt.Errorf("GitHub pull request list exceeds the supported page limit")
-}
-
-func (c *goAppClient) pullRequestChangedPaths(ctx context.Context, client *gh.Client, owner, repository string, number int) ([]string, error) {
-	paths := make([]string, 0)
-	for page := 1; page <= 100; page++ {
-		files, response, err := client.PullRequests.ListFiles(ctx, owner, repository, number, &gh.ListOptions{Page: page, PerPage: 100})
-		if err != nil {
-			return nil, mapGitHubRepositoryError(err)
+	result := make([]RemotePullRequest, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.GetNumber() <= 0 {
+			continue
 		}
-		for _, file := range files {
-			if file != nil && strings.TrimSpace(file.GetFilename()) != "" {
-				paths = append(paths, file.GetFilename())
-			}
-		}
-		if response == nil || response.NextPage == 0 {
-			return paths, nil
-		}
+		head := item.GetHead()
+		result = append(result, RemotePullRequest{Number: int64(item.GetNumber()), Title: item.GetTitle(), State: item.GetState(), Draft: item.GetDraft(), HeadSHA: head.GetSHA(), HeadRef: head.GetRef(), BaseRef: item.GetBase().GetRef(), Body: item.GetBody(), AuthorLogin: item.GetUser().GetLogin(), Merged: item.GetMerged(), URL: item.GetHTMLURL(), UpdatedAt: item.GetUpdatedAt().Time.UTC()})
 	}
-	return nil, fmt.Errorf("GitHub pull request file list exceeds the supported page limit")
+	return result, nil
 }
 
 func (c *goAppClient) RepositoryFile(ctx context.Context, installationID int64, fullName, path, ref string) (RemoteFile, error) {
@@ -1466,7 +1461,7 @@ func (c *goAppClient) CreateDraftPullRequest(ctx context.Context, installationID
 		return RemotePullRequest{}, err
 	}
 	draft := true
-	pullRequest, _, err := client.PullRequests.Create(ctx, owner, repository, &gh.NewPullRequest{
+	pullRequest, response, err := client.PullRequests.Create(ctx, owner, repository, &gh.NewPullRequest{
 		Title: &title,
 		Body:  &body,
 		Head:  &head,
@@ -1474,7 +1469,7 @@ func (c *goAppClient) CreateDraftPullRequest(ctx context.Context, installationID
 		Draft: &draft,
 	})
 	if err != nil {
-		return RemotePullRequest{}, err
+		return RemotePullRequest{}, mapGitHubPullRequestResponseError(response, err)
 	}
 	if pullRequest == nil {
 		return RemotePullRequest{}, fmt.Errorf("GitHub returned an empty pull request")

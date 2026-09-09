@@ -35,6 +35,13 @@ type fakeHistoryClient struct {
 	pullRequestsErr error
 }
 
+type cancelingHistoryClient struct {
+	*fakeAppClient
+	cancel context.CancelFunc
+}
+
+type contextAwareMemoryStore struct{ *MemoryStore }
+
 type fakeUserAuthClient struct {
 	*fakeAppClient
 	credential UserAccessToken
@@ -77,6 +84,22 @@ func (f *fakeHistoryClient) RepositoryCommits(_ context.Context, _ int64, _, _ s
 
 func (f *fakeHistoryClient) RepositoryPullRequests(_ context.Context, _ int64, _ string) ([]RemotePullRequest, error) {
 	return f.pullRequests, f.pullRequestsErr
+}
+
+func (f *cancelingHistoryClient) RepositoryCommits(context.Context, int64, string, string) ([]RemoteCommit, error) {
+	f.cancel()
+	return nil, errors.New("history unavailable")
+}
+
+func (f *cancelingHistoryClient) RepositoryPullRequests(context.Context, int64, string) ([]RemotePullRequest, error) {
+	return nil, errors.New("history unavailable")
+}
+
+func (s *contextAwareMemoryStore) ListCIRuns(ctx context.Context, organizationID, repositoryID string) ([]CIRun, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.MemoryStore.ListCIRuns(ctx, organizationID, repositoryID)
 }
 
 func TestInstallationSyncAndRepositoryLinking(t *testing.T) {
@@ -212,6 +235,53 @@ func TestRepositoryContextFallsBackWhenGitHubHistoryFails(t *testing.T) {
 	}
 	if len(result.PullRequests) != 1 || result.PullRequests[0].Title != "stored pull request" {
 		t.Fatalf("pull requests = %#v, want stored fallback", result.PullRequests)
+	}
+}
+
+func TestRepositoryContextLoadsStoredDataBeforeOptionalLiveHistory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := NewMemoryStore()
+	repository, err := store.UpsertRepository(ctx, "org-1", 42, 7, "acme/app", "main", "https://github.com/acme/app.git")
+	if err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	if err := store.LinkRepository(ctx, "org-1", "project-1", repository.ID); err != nil {
+		t.Fatalf("link repository: %v", err)
+	}
+	client := &cancelingHistoryClient{fakeAppClient: &fakeAppClient{}, cancel: cancel}
+	service := NewService(&contextAwareMemoryStore{MemoryStore: store}, client, AppConfig{}, nil, nil, nil, nil)
+	actor := identity.Actor{ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{identity.CapabilityRepositoryRead: true}}
+
+	result, err := service.RepositoryContext(ctx, actor, "project-1", repository.ID)
+	if err != nil {
+		t.Fatalf("repository context: %v", err)
+	}
+	if result.Repository.ID != repository.ID {
+		t.Fatalf("repository = %#v, want stored context", result.Repository)
+	}
+}
+
+func TestBranchPlanFindPullRequestFallsBackToStoredHistory(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	repository, err := store.UpsertRepository(ctx, "org-1", 42, 7, "acme/app", "main", "https://github.com/acme/app.git")
+	if err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	if err := store.LinkRepository(ctx, "org-1", "project-1", repository.ID); err != nil {
+		t.Fatalf("link repository: %v", err)
+	}
+	if _, err := store.UpsertPullRequest(ctx, "org-1", repository.ID, PullRequest{Number: 7, State: "open", HeadRef: "feature", BaseRef: "main"}); err != nil {
+		t.Fatalf("seed pull request: %v", err)
+	}
+	client := &fakeHistoryClient{fakeAppClient: &fakeAppClient{}, pullRequestsErr: errors.New("history unavailable")}
+	service := NewService(store, client, AppConfig{}, nil, nil, nil, nil)
+	actor := identity.Actor{ID: "user-1", OrganizationID: "org-1", Capabilities: map[string]bool{identity.CapabilityBranchManage: true}}
+
+	result, found, err := service.BranchPlanFindPullRequest(ctx, actor, "project-1", repository.ID, "feature", "main")
+	if err != nil || !found || result.Number != 7 {
+		t.Fatalf("pull request = %#v, found = %t, err = %v", result, found, err)
 	}
 }
 
